@@ -1,0 +1,399 @@
+import soundcard as sc
+import soundfile as sf
+import threading
+import time
+import os
+import lameenc
+import numpy as np
+import tempfile
+from app_metadata import RECORDING_FILENAME_PREFIX
+
+FORMAT_CONFIG = {
+    "wav": {
+        "label": "WAV",
+        "extension": ".wav",
+        "encoder": "soundfile",
+        "format": "WAV",
+    },
+    "flac": {
+        "label": "FLAC",
+        "extension": ".flac",
+        "encoder": "soundfile",
+        "format": "FLAC",
+    },
+    "mp3": {
+        "label": "MP3",
+        "extension": ".mp3",
+        "encoder": "lameenc",
+    },
+}
+
+QUALITY_CONFIG = {
+    "balanced": {
+        "label": "Balanced",
+        "sample_rate": 16000,
+        "subtype": "PCM_16",
+        "mp3_bitrate_kbps": 64,
+    },
+    "high": {
+        "label": "High Quality",
+        "sample_rate": 48000,
+        "subtype": "PCM_24",
+        "mp3_bitrate_kbps": 128,
+    },
+}
+
+NORMALIZE_ACTIVE_FLOOR = 0.001
+NORMALIZE_TARGET_LEVEL = 0.12
+NORMALIZE_MAX_GAIN = 8.0
+NORMALIZE_REFERENCE_PERCENTILE = 95
+NORMALIZE_LIMIT = 0.98
+
+
+def build_output_profile(fmt, quality, stereo):
+    fmt_key = str(fmt or "").strip().lower()
+    quality_key = str(quality or "").strip().lower()
+
+    if fmt_key not in FORMAT_CONFIG:
+        raise ValueError(f"Unsupported output format: {fmt}")
+    if quality_key not in QUALITY_CONFIG:
+        raise ValueError(f"Unsupported output quality: {quality}")
+
+    format_config = FORMAT_CONFIG[fmt_key]
+    quality_config = QUALITY_CONFIG[quality_key]
+    channels = 2 if stereo else 1
+    return {
+        **quality_config,
+        **format_config,
+        "label": format_config["label"],
+        "format_label": format_config["label"],
+        "quality_label": quality_config["label"],
+        "format_key": fmt_key,
+        "quality_key": quality_key,
+        "channels": channels,
+    }
+
+
+def describe_output_profile(fmt, quality, stereo):
+    profile = build_output_profile(fmt, quality, stereo)
+    rate_khz = profile["sample_rate"] // 1000
+    channels = "stereo" if profile["channels"] == 2 else "mono"
+    encoding = (
+        f"{profile['mp3_bitrate_kbps']} kbps"
+        if profile["encoder"] == "lameenc"
+        else profile["subtype"]
+    )
+    return f"{profile['format_label']} / {rate_khz} kHz / {channels} / {encoding}"
+
+
+def build_recording_filename(timestamp, extension):
+    clean_extension = str(extension or "").strip()
+    if clean_extension and not clean_extension.startswith("."):
+        clean_extension = f".{clean_extension}"
+    return f"{RECORDING_FILENAME_PREFIX}_{timestamp}{clean_extension}"
+
+
+class RawRecorder(threading.Thread):
+    """
+    Helper thread to record a single device to a WAV file.
+    """
+    def __init__(self, device, filepath, samplerate=44100, channels=2, subtype="PCM_16"):
+        super().__init__()
+        self.device = device
+        self.filepath = filepath
+        self.samplerate = samplerate
+        self.channels = channels
+        self.subtype = subtype
+        self.stop_event = threading.Event()
+        self.error = None
+
+    def run(self):
+        try:
+            with sf.SoundFile(
+                self.filepath,
+                mode="w",
+                samplerate=self.samplerate,
+                channels=self.channels,
+                format="WAV",
+                subtype=self.subtype,
+            ) as f_wav:
+                with self.device.recorder(samplerate=self.samplerate, channels=self.channels) as mic:
+                    while not self.stop_event.is_set():
+                        data = mic.record(numframes=2048)
+                        f_wav.write(data)
+        except Exception as e:
+            self.error = str(e)
+
+    def stop(self):
+        self.stop_event.set()
+        self.join()
+
+class AudioRecorder(threading.Thread):
+    """
+    Orchestrates recording from Microphone, Loopback, or Both.
+    """
+    def __init__(
+        self,
+        mic_id,
+        source_mode,
+        output_folder,
+        output_format="flac",
+        quality="balanced",
+        stereo=False,
+        normalize=False,
+        on_finish_callback=None,
+    ):
+        super().__init__()
+        self.mic_id = mic_id
+        self.source_mode = source_mode # "mic", "loopback", "both"
+        self.output_folder = output_folder
+        self.output_format = str(output_format or "flac").strip().lower()
+        self.quality = str(quality or "balanced").strip().lower()
+        self.stereo = bool(stereo)
+        self.profile = build_output_profile(self.output_format, self.quality, self.stereo)
+        self.normalize = normalize
+        self.callback = on_finish_callback
+        
+        self.recording = False
+        self.stop_event = threading.Event()
+        self.error_message = None
+        self.final_filepath = None
+        
+        # Temp files
+        self.temp_files = []
+        self.recorders = []
+
+    def _get_device(self, is_loopback):
+        if is_loopback:
+            # For loopback, we try to find the default speaker's loopback
+            default_speaker = sc.default_speaker()
+            mics = sc.all_microphones(include_loopback=True)
+            # Try exact name match
+            loopback_mic = next((m for m in mics if m.name == default_speaker.name), None)
+            # Try fuzzy match
+            if not loopback_mic:
+                loopback_mic = next((m for m in mics if default_speaker.name in m.name), None)
+            
+            if not loopback_mic:
+                raise Exception("Could not detect System Audio loopback device.")
+            return loopback_mic
+        else:
+            return sc.get_microphone(self.mic_id, include_loopback=False)
+
+    def run(self):
+        self.recording = True
+        self.error_message = None
+        self.temp_files = []
+        self.recorders = []
+        
+        try:
+            samplerate = self.profile["sample_rate"]
+            channels = self.profile["channels"]
+            subtype = self.profile["subtype"]
+
+            # 1. Setup Recorders
+            if self.source_mode == "both":
+                # Need two recorders
+                dev_mic = self._get_device(is_loopback=False)
+                dev_loop = self._get_device(is_loopback=True)
+                
+                t1 = tempfile.NamedTemporaryFile(suffix=".wav", delete=False).name
+                t2 = tempfile.NamedTemporaryFile(suffix=".wav", delete=False).name
+                self.temp_files = [t1, t2]
+                
+                self.recorders.append(RawRecorder(dev_mic, t1, samplerate=samplerate, channels=channels, subtype=subtype))
+                self.recorders.append(RawRecorder(dev_loop, t2, samplerate=samplerate, channels=channels, subtype=subtype))
+                
+            elif self.source_mode == "loopback":
+                dev = self._get_device(is_loopback=True)
+                t1 = tempfile.NamedTemporaryFile(suffix=".wav", delete=False).name
+                self.temp_files = [t1]
+                self.recorders.append(RawRecorder(dev, t1, samplerate=samplerate, channels=channels, subtype=subtype))
+                
+            else: # mic
+                dev = self._get_device(is_loopback=False)
+                t1 = tempfile.NamedTemporaryFile(suffix=".wav", delete=False).name
+                self.temp_files = [t1]
+                self.recorders.append(RawRecorder(dev, t1, samplerate=samplerate, channels=channels, subtype=subtype))
+
+            print(f"Starting recording mode: {self.source_mode}")
+
+            # 2. Start Recording
+            for r in self.recorders:
+                r.start()
+            
+            # Wait for stop signal
+            self.stop_event.wait()
+            
+            # 3. Stop Recording
+            for r in self.recorders:
+                r.stop()
+                if r.error:
+                    raise Exception(f"Recorder error: {r.error}")
+
+            # 4. Mix/Process
+            source_wav = self._prepare_source_wav(subtype)
+            
+            # 6. Finalize
+            if not os.path.exists(self.output_folder):
+                os.makedirs(self.output_folder)
+
+            timestamp = time.strftime("%Y%m%d_%H%M%S")
+            filename = build_recording_filename(timestamp, self.profile["extension"])
+            self.final_filepath = os.path.join(self.output_folder, filename)
+            self._write_final_output(source_wav, self.final_filepath)
+
+        except Exception as e:
+            self.error_message = str(e)
+            print(f"Error during recording process: {e}")
+        finally:
+            self.recording = False
+            # Clean up all temp files
+            for t in self.temp_files:
+                if os.path.exists(t):
+                    try:
+                        os.remove(t)
+                    except: pass
+                
+            if self.callback:
+                self.callback(self.final_filepath, self.error_message)
+
+    def stop(self):
+        self.stop_event.set()
+
+    def _prepare_source_wav(self, subtype):
+        if len(self.temp_files) == 2:
+            if self.normalize:
+                self._normalize_audio(self.temp_files[0])
+                self._normalize_audio(self.temp_files[1])
+
+            mixed_wav = tempfile.NamedTemporaryFile(suffix=".wav", delete=False).name
+            self._mix_audio(
+                self.temp_files[0],
+                self.temp_files[1],
+                mixed_wav,
+                subtype,
+                limit_output=self.normalize,
+            )
+            self.temp_files.append(mixed_wav) # Mark for cleanup
+
+            if self.normalize:
+                self._limit_audio(mixed_wav)
+
+            return mixed_wav
+
+        source_wav = self.temp_files[0]
+        if self.normalize:
+            self._normalize_audio(source_wav)
+        return source_wav
+
+    def _mix_audio(self, file1, file2, out_file, subtype, limit_output=False):
+        d1, sr1 = sf.read(file1, always_2d=True)
+        d2, sr2 = sf.read(file2, always_2d=True)
+
+        if sr1 != sr2:
+            raise ValueError("Cannot mix audio with different sample rates.")
+        if d1.shape[1] != d2.shape[1]:
+            raise ValueError("Cannot mix audio with different channel counts.")
+        
+        # Ensure same length
+        max_len = max(len(d1), len(d2))
+        
+        # Pad d1
+        if len(d1) < max_len:
+            pad_width = max_len - len(d1)
+            # handle mono/stereo padding
+            shape = (pad_width, d1.shape[1])
+            d1 = np.concatenate((d1, np.zeros(shape, dtype=d1.dtype)))
+            
+        # Pad d2
+        if len(d2) < max_len:
+            pad_width = max_len - len(d2)
+            shape = (pad_width, d2.shape[1])
+            d2 = np.concatenate((d2, np.zeros(shape, dtype=d2.dtype)))
+            
+        mixed = d1 + d2
+        if limit_output:
+            mixed = self._apply_limiter(mixed)
+        else:
+            mixed = np.clip(mixed, -1.0, 1.0)
+        
+        sf.write(out_file, mixed, sr1, format="WAV", subtype=subtype)
+
+    def _normalize_audio(self, filepath):
+        try:
+            info = sf.info(filepath)
+            data, sr = sf.read(filepath, always_2d=True)
+            data = self._normalize_audio_data(data)
+            sf.write(filepath, data, sr, format=info.format, subtype=info.subtype)
+        except Exception as e:
+            print(f"Normalization failed: {e}")
+
+    def _normalize_audio_data(self, data):
+        active = np.abs(data)
+        active = active[active >= NORMALIZE_ACTIVE_FLOOR]
+        if active.size == 0:
+            return self._apply_limiter(data)
+
+        rms = float(np.sqrt(np.mean(active ** 2)))
+        percentile = float(np.percentile(active, NORMALIZE_REFERENCE_PERCENTILE))
+        reference_level = max(rms, percentile)
+        if not np.isfinite(reference_level) or reference_level <= 0:
+            return self._apply_limiter(data)
+
+        gain = min(NORMALIZE_TARGET_LEVEL / reference_level, NORMALIZE_MAX_GAIN)
+        return self._apply_limiter(data * gain)
+
+    def _limit_audio(self, filepath):
+        info = sf.info(filepath)
+        data, sr = sf.read(filepath, always_2d=True)
+        data = self._apply_limiter(data)
+        sf.write(filepath, data, sr, format=info.format, subtype=info.subtype)
+
+    def _apply_limiter(self, data):
+        return np.clip(data, -NORMALIZE_LIMIT, NORMALIZE_LIMIT)
+
+    def _write_final_output(self, source_wav, final_filepath):
+        if self.profile["encoder"] == "lameenc":
+            self._convert_to_mp3(source_wav, final_filepath, self.profile["mp3_bitrate_kbps"])
+            return
+
+        data, sr = sf.read(source_wav, always_2d=True)
+        if self.profile["channels"] == 1 and data.shape[1] > 1:
+            data = np.mean(data, axis=1, keepdims=True)
+
+        sf.write(
+            final_filepath,
+            data,
+            sr,
+            format=self.profile["format"],
+            subtype=self.profile["subtype"],
+        )
+
+    def _convert_to_mp3(self, src_wav, dst_mp3, bitrate_kbps):
+        data, sr = sf.read(src_wav, always_2d=True)
+        if self.profile["channels"] == 1 and data.shape[1] > 1:
+            data = np.mean(data, axis=1, keepdims=True)
+        channels = data.shape[1]
+        
+        pcm_data = (data * 32767).clip(-32768, 32767).astype(np.int16)
+        
+        encoder = lameenc.Encoder()
+        encoder.set_bit_rate(bitrate_kbps)
+        encoder.set_in_sample_rate(sr)
+        encoder.set_channels(channels)
+        encoder.set_quality(2)
+        
+        mp3_data = encoder.encode(pcm_data.tobytes())
+        mp3_data += encoder.flush()
+        
+        with open(dst_mp3, "wb") as f_mp3:
+            f_mp3.write(mp3_data)
+
+def get_devices(include_loopback=False):
+    try:
+        devices = sc.all_microphones(include_loopback=include_loopback)
+        return [{"id": d.id, "name": d.name} for d in devices]
+    except Exception as e:
+        print(f"Error fetching devices: {e}")
+        return []
