@@ -183,19 +183,27 @@ class AudioRecorderAutoStopTests(unittest.TestCase):
 
         metadata = recorder.build_finish_metadata()
 
-        self.assertEqual(
-            metadata,
-            {
-                "auto_stop_enabled": True,
-                "auto_stop_silence_seconds": 600,
-                "auto_stop_triggered": True,
-                "auto_stop_reason": "silence_timeout_10min",
-                "trim_silence_enabled": False,
-                "trim_silence_keep_seconds": 5.0,
-                "trim_silence_applied": False,
-                "trim_silence_removed_seconds": 0.0,
-            },
-        )
+        expected_core = {
+            "auto_stop_enabled": True,
+            "auto_stop_silence_seconds": 600,
+            "auto_stop_triggered": True,
+            "auto_stop_reason": "silence_timeout_10min",
+            "trim_silence_enabled": False,
+            "trim_silence_keep_seconds": 5.0,
+            "trim_silence_applied": False,
+            "trim_silence_removed_seconds": 0.0,
+        }
+        self.assertEqual({key: metadata[key] for key in expected_core}, expected_core)
+        self.assertEqual(metadata["echo_suppression_enabled"], False)
+        self.assertEqual(metadata["echo_suppression_applied"], False)
+        self.assertEqual(metadata["echo_suppression_reason"], "not_run")
+        self.assertEqual(metadata["echo_suppression_stats"], {})
+        self.assertEqual(metadata["noise_reduction_enabled"], False)
+        self.assertIn("noise_reduction_available", metadata)
+        self.assertEqual(metadata["noise_reduction_applied"], False)
+        self.assertEqual(metadata["noise_reduction_reason"], "not_run")
+        self.assertEqual(metadata["source_leveling_enabled"], False)
+        self.assertEqual(metadata["source_leveling_stats"], {})
 
 
 if __name__ == "__main__":
