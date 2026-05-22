@@ -1,65 +1,109 @@
 # MeetRec
 
-**MeetRec** is a lightweight Windows recorder for meetings, calls, microphone audio, system audio, or both simultaneously.
-It sits quietly in your system tray and is always ready with a single click or global hotkey.
+**MeetRec** is a lightweight Windows tray recorder for meetings, calls, microphone audio, system audio, or both at the same time.
+It is designed to stay out of the way: configure it once, then start or stop recordings from the tray icon, a global hotkey, or the floating timer.
 
-<img width="393" height="156" alt="MeetRec tray status" src="https://github.com/user-attachments/assets/7e3bfcaf-6f58-4404-b85a-4ba0b6fea085" />
+![MeetRec settings](docs/meetrec-settings.png)
+
+![MeetRec floating recording timer](docs/meetrec-floating-timer.png)
 
 ## Features
 
-<img width="575" height="724" alt="MeetRec settings" src="https://github.com/user-attachments/assets/b35131bc-1ff8-41e1-87b5-1e472f9da981" />
+### Recording Sources
 
-- **Modes**
-  - Microphone: Record your voice.
-  - System Audio: Record what you hear from the computer.
-  - Both: Record both sources simultaneously and mix them into one file.
-- **Output Profiles**
-  - Format: Save recordings as WAV, FLAC, or MP3.
-  - Quality: Choose Balanced for compact 16 kHz output or High Quality for 48 kHz output.
-  - Stereo: Keep stereo channels when needed, or leave it off for mono recordings.
-- **Post-Processing**
-  - Auto-Normalize: Lifts the main voice/body of each source before mixing and limits sharp peaks so brief spikes do not bury the recording.
-  - Clipboard Integration: Automatically copies the file or file path to your clipboard.
-  - Clean Workflow: Option to move the file to a temp folder and copy it, keeping your desktop clean.
-- **Control**
-  - Global Hotkeys: Start or stop recording from anywhere.
-  - Tray Icon: Left-click to toggle recording immediately; right-click to open the recordings folder, settings, or exit.
-  - Visual Feedback: Tray icon changes color while recording, and an optional always-on-top floating timer shows recording status with the same right-click menu.
+- **Microphone**: record the selected input device.
+- **System Audio**: record loopback audio from the computer.
+- **Both**: record microphone and system audio together, then mix them into one file.
 
-## Installation
+### Output Configuration
 
-1. Go to the [Releases](https://github.com/phoenixray2000/MeetRec/releases) page.
-2. Download `MeetRec.exe`.
-3. Run it. No installation is required.
+- **Formats**: WAV, FLAC, or MP3.
+- **Quality**:
+  - Balanced: 16 kHz output, PCM_16 for WAV/FLAC, 64 kbps for MP3.
+  - High Quality: 48 kHz output, PCM_24 for WAV/FLAC, 128 kbps for MP3.
+- **Stereo**: keep stereo channels when needed, or leave it off for mono output.
+- **Preview**: the settings window shows the exact output profile, for example `WAV / 16 kHz / mono / PCM_16`.
+
+### Recording Control
+
+- **Tray icon**: left-click starts or stops recording; right-click opens recording actions, the output folder, settings, or exit.
+- **Left-click mode**: choose Last Used, Microphone, Loopback, or Both.
+- **Global hotkeys**: configure separate hotkeys for microphone, loopback, both, and stop.
+- **Record hotkeys stop recording**: when enabled, pressing any record hotkey again stops the active recording.
+- **Windows hotkey handling**: supports common combinations such as `alt+shift+r` through a low-level Windows hotkey path.
+- **Floating recording timer**: optional always-on-top timer. Click it while recording to stop; after stopping, it stays briefly in a finished state and clicking it opens the recordings folder.
+
+### Automation And Feedback
+
+- **Start with Windows**: optionally launch MeetRec when Windows starts.
+- **Auto-stop after silence**: Off, 5 minutes, 10 minutes, or 20 minutes.
+- **Tray notifications**: enable or disable tray balloon notifications.
+- **Single instance**: launching MeetRec again exits immediately if another instance is already running.
+
+### Post-Processing
+
+- **Normalize Audio (Apply first)**: raises the main voice/body of each source before mixing and limits sharp peaks.
+- **Silence trim**: optional post-processing that trims only the start and end silence beyond 5 seconds, using the same mic/loopback activity detection rules as silence auto-stop.
+- **Copy File to Clipboard**: copy the completed recording to the clipboard.
+- **Delete after Copy (Move to Temp)**: move the file to the temp folder after copying, keeping the output folder clean.
 
 ## Usage
 
-1. Right-click the tray icon to open **Settings**.
-2. Select your microphone, output folder, format, quality, and stereo preference.
-3. Set your hotkeys if needed.
-4. Disable **Show floating recording timer** if you do not want the compact always-on-top recording indicator.
-5. Left-click the tray icon or use a hotkey to start recording.
-6. Click the tray icon again, use a stop hotkey, or click the floating timer to stop. The floating timer changes state immediately, then hides after 5 seconds; click it again before it hides to open the recordings folder.
+1. Start `MeetRec.exe`.
+2. Right-click the tray icon and open **Settings**.
+3. In **General**, choose startup behavior, whether to show the floating recording timer, and silence auto-stop.
+4. In **Input Device**, select the microphone and refresh devices if needed.
+5. In **Output Configuration**, choose the folder, format, quality, and stereo mode.
+6. In **Tray Icon Behavior**, choose what left-click should record.
+7. In **Notifications**, decide whether tray notifications should be shown.
+8. In **Post-Processing & Clipboard**, enable normalization, edge-silence trim, clipboard copy, or delete-after-copy as needed.
+9. In **Global Hotkeys**, set hotkeys and decide whether record hotkeys should stop the active recording.
+10. Click **Save Settings**.
+
+## Packaging
+
+The maintained package is an onedir build:
+
+```powershell
+pyinstaller --noconfirm MeetRec.spec
+```
+
+The output is:
+
+```text
+dist\MeetRec\MeetRec.exe
+```
+
+Keep the whole `dist\MeetRec` folder together. This package layout avoids the extra onefile bootloader process and lets MeetRec run as a single visible `MeetRec.exe` process.
 
 ## Development
 
 ### Requirements
 
 - Python 3.12+
-- `pip install PyQt6 soundcard soundfile numpy lameenc keyboard`
+- PyQt6
+- soundcard
+- soundfile
+- numpy
+- lameenc
+- keyboard
+- pyinstaller
 
-### Build From Source
+Install the runtime dependencies:
 
-To create the standalone executable:
-
-```bash
-pip install pyinstaller
-pyinstaller --noconsole --onefile --name MeetRec main.py
+```powershell
+pip install PyQt6 soundcard soundfile numpy lameenc keyboard pyinstaller
 ```
 
-For the maintained Windows package configuration, use:
+Run tests:
 
-```bash
+```powershell
+python -m unittest discover -s tests
+```
+
+Build the Windows package:
+
+```powershell
 pyinstaller --noconfirm MeetRec.spec
 ```
 

@@ -6,6 +6,7 @@ import os
 import lameenc
 import numpy as np
 import tempfile
+from collections import deque
 from app_metadata import RECORDING_FILENAME_PREFIX
 
 FORMAT_CONFIG = {
@@ -48,6 +49,36 @@ NORMALIZE_TARGET_LEVEL = 0.12
 NORMALIZE_MAX_GAIN = 8.0
 NORMALIZE_REFERENCE_PERCENTILE = 95
 NORMALIZE_LIMIT = 0.98
+RAW_RECORDER_CHUNK_FRAMES = 2048
+
+AUTO_STOP_OFF = None
+AUTO_STOP_5_MINUTES = 300
+AUTO_STOP_10_MINUTES = 600
+AUTO_STOP_20_MINUTES = 1200
+AUTO_STOP_DEFAULT_SECONDS = AUTO_STOP_10_MINUTES
+AUTO_STOP_MIN_RECORD_SECONDS = 60.0
+
+AUTO_STOP_OPTIONS = [
+    (AUTO_STOP_OFF, "Off"),
+    (AUTO_STOP_5_MINUTES, "5 minutes"),
+    (AUTO_STOP_10_MINUTES, "10 minutes"),
+    (AUTO_STOP_20_MINUTES, "20 minutes"),
+]
+
+TRIM_SILENCE_DEFAULT_ENABLED = False
+TRIM_EDGE_SILENCE_SECONDS = 5.0
+
+MIC_ACTIVITY_DETECTOR_CONFIG = {
+    "margin_db": 9.0,
+    "min_threshold_db": -55.0,
+    "max_threshold_db": -30.0,
+}
+
+LOOPBACK_ACTIVITY_DETECTOR_CONFIG = {
+    "margin_db": 12.0,
+    "min_threshold_db": -60.0,
+    "max_threshold_db": -28.0,
+}
 
 
 def build_output_profile(fmt, quality, stereo):
@@ -86,6 +117,43 @@ def describe_output_profile(fmt, quality, stereo):
     return f"{profile['format_label']} / {rate_khz} kHz / {channels} / {encoding}"
 
 
+def normalize_auto_stop_silence_seconds(value):
+    if value is None or value is False:
+        return None
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in ("", "off", "none", "false", "0"):
+            return None
+        try:
+            value = int(normalized)
+        except ValueError:
+            return AUTO_STOP_DEFAULT_SECONDS
+
+    try:
+        seconds = int(value)
+    except (TypeError, ValueError):
+        return AUTO_STOP_DEFAULT_SECONDS
+
+    supported = {seconds for seconds, _label in AUTO_STOP_OPTIONS if seconds is not None}
+    if seconds in supported:
+        return seconds
+    return AUTO_STOP_DEFAULT_SECONDS
+
+
+def normalize_trim_silence_enabled(value):
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return TRIM_SILENCE_DEFAULT_ENABLED
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in ("true", "1", "yes", "on"):
+            return True
+        if normalized in ("false", "0", "no", "off", ""):
+            return False
+    return bool(value)
+
+
 def build_recording_filename(timestamp, extension):
     clean_extension = str(extension or "").strip()
     if clean_extension and not clean_extension.startswith("."):
@@ -93,17 +161,268 @@ def build_recording_filename(timestamp, extension):
     return f"{RECORDING_FILENAME_PREFIX}_{timestamp}{clean_extension}"
 
 
+class SourceActivityDetector:
+    def __init__(
+        self,
+        margin_db=10.0,
+        min_threshold_db=-55.0,
+        max_threshold_db=-28.0,
+        history_seconds=30.0,
+        active_window_seconds=1.0,
+        active_ratio=0.2,
+    ):
+        self.margin_db = float(margin_db)
+        self.min_threshold_db = float(min_threshold_db)
+        self.max_threshold_db = float(max_threshold_db)
+        self.history_seconds = float(history_seconds)
+        self.active_window_seconds = float(active_window_seconds)
+        self.active_ratio = float(active_ratio)
+        self.recent_db_values = deque()
+        self.recent_activity = deque()
+        self.current_db = -120.0
+        self.noise_floor_db = -120.0
+        self.threshold_db = self.min_threshold_db
+        self.active = False
+
+    def update(self, data, samplerate, now=None):
+        if now is None:
+            now = time.monotonic()
+
+        audio = np.asarray(data, dtype=np.float32)
+        if audio.size == 0:
+            return self.active
+
+        mean_square = float(np.mean(audio ** 2))
+        if mean_square <= 0:
+            self.current_db = -100.0
+        else:
+            rms = float(np.sqrt(mean_square))
+            self.current_db = max(20.0 * np.log10(rms), -100.0)
+
+        self.recent_db_values.append((now, self.current_db))
+        history_cutoff = now - self.history_seconds
+        while self.recent_db_values and self.recent_db_values[0][0] < history_cutoff:
+            self.recent_db_values.popleft()
+
+        db_values = np.array([value for _timestamp, value in self.recent_db_values], dtype=np.float32)
+        self.noise_floor_db = float(np.percentile(db_values, 20))
+        dynamic_threshold = self.noise_floor_db + self.margin_db
+        self.threshold_db = min(
+            max(dynamic_threshold, self.min_threshold_db),
+            self.max_threshold_db,
+        )
+
+        block_active = self.current_db >= self.threshold_db
+        self.recent_activity.append((now, block_active))
+        active_cutoff = now - self.active_window_seconds
+        while self.recent_activity and self.recent_activity[0][0] < active_cutoff:
+            self.recent_activity.popleft()
+
+        total_blocks = len(self.recent_activity)
+        active_blocks = sum(1 for _timestamp, is_active in self.recent_activity if is_active)
+        self.active = total_blocks > 0 and (active_blocks / total_blocks) >= self.active_ratio
+        return self.active
+
+
+def build_activity_detector(source_name):
+    config = (
+        LOOPBACK_ACTIVITY_DETECTOR_CONFIG
+        if source_name == "loopback"
+        else MIC_ACTIVITY_DETECTOR_CONFIG
+    )
+    return SourceActivityDetector(**config)
+
+
+def _as_2d_audio(data):
+    audio = np.asarray(data)
+    if audio.ndim == 1:
+        audio = audio.reshape(-1, 1)
+    return audio
+
+
+def build_source_activity_timeline(
+    data,
+    samplerate,
+    source_name,
+    chunk_frames=RAW_RECORDER_CHUNK_FRAMES,
+):
+    audio = _as_2d_audio(data).astype(np.float32, copy=False)
+    detector = build_activity_detector(source_name)
+    timeline = []
+    chunk_frames = int(chunk_frames)
+
+    for start_frame in range(0, len(audio), chunk_frames):
+        end_frame = min(len(audio), start_frame + chunk_frames)
+        now = start_frame / float(samplerate)
+        active = detector.update(audio[start_frame:end_frame], samplerate, now=now)
+        timeline.append((start_frame, end_frame, bool(active)))
+
+    return timeline
+
+
+def _combine_activity_timelines(source_timelines, total_frames, chunk_frames):
+    combined = []
+    chunk_frames = int(chunk_frames)
+    chunk_count = int(np.ceil(total_frames / float(chunk_frames))) if total_frames else 0
+
+    for chunk_index in range(chunk_count):
+        start_frame = chunk_index * chunk_frames
+        end_frame = min(total_frames, start_frame + chunk_frames)
+        active = any(
+            chunk_index < len(timeline) and bool(timeline[chunk_index][2])
+            for timeline in source_timelines
+        )
+        combined.append((start_frame, end_frame, active))
+
+    return combined
+
+
+def _bounds_from_activity_timeline(
+    timeline,
+    total_frames,
+    samplerate,
+    keep_silence_seconds=TRIM_EDGE_SILENCE_SECONDS,
+):
+    keep_frames = max(1, int(round(float(samplerate) * keep_silence_seconds)))
+    active_entries = [entry for entry in timeline if entry[2]]
+
+    if total_frames <= 0:
+        return 0, 0, {
+            "applied": False,
+            "start_removed_seconds": 0.0,
+            "end_removed_seconds": 0.0,
+        }
+
+    if not active_entries:
+        end_frame = min(total_frames, keep_frames)
+        return 0, end_frame, {
+            "applied": end_frame < total_frames,
+            "start_removed_seconds": 0.0,
+            "end_removed_seconds": (total_frames - end_frame) / float(samplerate),
+        }
+
+    first_active_frame = active_entries[0][0]
+    last_active_frame = active_entries[-1][1]
+    start_frame = max(0, first_active_frame - keep_frames)
+    end_frame = min(total_frames, last_active_frame + keep_frames)
+
+    return start_frame, end_frame, {
+        "applied": start_frame > 0 or end_frame < total_frames,
+        "start_removed_seconds": start_frame / float(samplerate),
+        "end_removed_seconds": (total_frames - end_frame) / float(samplerate),
+    }
+
+
+def calculate_trim_bounds_for_sources(
+    sources,
+    samplerate,
+    keep_silence_seconds=TRIM_EDGE_SILENCE_SECONDS,
+    chunk_frames=RAW_RECORDER_CHUNK_FRAMES,
+):
+    normalized_sources = [
+        (source_name, _as_2d_audio(data))
+        for source_name, data in sources
+    ]
+    total_frames = max((len(data) for _source_name, data in normalized_sources), default=0)
+    source_timelines = [
+        build_source_activity_timeline(
+            data,
+            samplerate,
+            source_name,
+            chunk_frames=chunk_frames,
+        )
+        for source_name, data in normalized_sources
+    ]
+    combined_timeline = _combine_activity_timelines(
+        source_timelines,
+        total_frames,
+        chunk_frames,
+    )
+    start_frame, end_frame, stats = _bounds_from_activity_timeline(
+        combined_timeline,
+        total_frames,
+        samplerate,
+        keep_silence_seconds=keep_silence_seconds,
+    )
+    stats["source_names"] = [source_name for source_name, _data in normalized_sources]
+    return start_frame, end_frame, stats
+
+
+def trim_edge_silence_data(
+    data,
+    samplerate,
+    source_name="mic",
+    keep_silence_seconds=TRIM_EDGE_SILENCE_SECONDS,
+    chunk_frames=RAW_RECORDER_CHUNK_FRAMES,
+):
+    audio = _as_2d_audio(data)
+    start_frame, end_frame, stats = calculate_trim_bounds_for_sources(
+        [(source_name, audio)],
+        samplerate,
+        keep_silence_seconds=keep_silence_seconds,
+        chunk_frames=chunk_frames,
+    )
+    return audio[start_frame:end_frame].copy(), stats
+
+
+class AutoStopController:
+    def __init__(
+        self,
+        silence_seconds=None,
+        min_record_seconds=AUTO_STOP_MIN_RECORD_SECONDS,
+        start_ts=None,
+    ):
+        self.silence_seconds = normalize_auto_stop_silence_seconds(silence_seconds)
+        self.min_record_seconds = float(min_record_seconds)
+        self.start_ts = time.monotonic() if start_ts is None else float(start_ts)
+        self.last_active_ts = self.start_ts
+
+    def update(self, source_active, now=None):
+        if now is None:
+            now = time.monotonic()
+
+        if self.silence_seconds is None:
+            return False
+
+        any_active = any(bool(active) for active in source_active.values())
+        if any_active:
+            self.last_active_ts = now
+            return False
+
+        if now - self.start_ts < self.min_record_seconds:
+            return False
+
+        return now - self.last_active_ts >= self.silence_seconds
+
+    def reason(self):
+        if self.silence_seconds is None:
+            return None
+        minutes = int(self.silence_seconds // 60)
+        return f"silence_timeout_{minutes}min"
+
+
 class RawRecorder(threading.Thread):
     """
     Helper thread to record a single device to a WAV file.
     """
-    def __init__(self, device, filepath, samplerate=44100, channels=2, subtype="PCM_16"):
+    def __init__(
+        self,
+        device,
+        filepath,
+        samplerate=44100,
+        channels=2,
+        subtype="PCM_16",
+        source_name=None,
+        on_audio_data=None,
+    ):
         super().__init__()
         self.device = device
         self.filepath = filepath
         self.samplerate = samplerate
         self.channels = channels
         self.subtype = subtype
+        self.source_name = source_name
+        self.on_audio_data = on_audio_data
         self.stop_event = threading.Event()
         self.error = None
 
@@ -119,7 +438,9 @@ class RawRecorder(threading.Thread):
             ) as f_wav:
                 with self.device.recorder(samplerate=self.samplerate, channels=self.channels) as mic:
                     while not self.stop_event.is_set():
-                        data = mic.record(numframes=2048)
+                        data = mic.record(numframes=RAW_RECORDER_CHUNK_FRAMES)
+                        if self.on_audio_data and self.source_name:
+                            self.on_audio_data(self.source_name, data)
                         f_wav.write(data)
         except Exception as e:
             self.error = str(e)
@@ -141,6 +462,8 @@ class AudioRecorder(threading.Thread):
         quality="balanced",
         stereo=False,
         normalize=False,
+        trim_silence=TRIM_SILENCE_DEFAULT_ENABLED,
+        auto_stop_silence_seconds=AUTO_STOP_DEFAULT_SECONDS,
         on_finish_callback=None,
     ):
         super().__init__()
@@ -152,6 +475,8 @@ class AudioRecorder(threading.Thread):
         self.stereo = bool(stereo)
         self.profile = build_output_profile(self.output_format, self.quality, self.stereo)
         self.normalize = normalize
+        self.trim_silence = normalize_trim_silence_enabled(trim_silence)
+        self.auto_stop_silence_seconds = normalize_auto_stop_silence_seconds(auto_stop_silence_seconds)
         self.callback = on_finish_callback
         
         self.recording = False
@@ -162,6 +487,73 @@ class AudioRecorder(threading.Thread):
         # Temp files
         self.temp_files = []
         self.recorders = []
+        self.activity_lock = threading.Lock()
+        self.activity_detectors = {}
+        self.source_active = {}
+        self.auto_stop_controller = None
+        self.auto_stop_triggered = False
+        self.auto_stop_reason = None
+        self.trim_silence_applied = False
+        self.trim_silence_removed_seconds = 0.0
+        self.finish_metadata = self.build_finish_metadata()
+
+    def _active_source_names(self):
+        if self.source_mode == "both":
+            return ["mic", "loopback"]
+        if self.source_mode == "loopback":
+            return ["loopback"]
+        return ["mic"]
+
+    def _build_activity_detector(self, source_name):
+        return build_activity_detector(source_name)
+
+    def _setup_auto_stop(self):
+        source_names = self._active_source_names()
+        self.activity_detectors = {
+            source_name: self._build_activity_detector(source_name)
+            for source_name in source_names
+        }
+        self.source_active = {source_name: False for source_name in source_names}
+        self.auto_stop_controller = AutoStopController(
+            silence_seconds=self.auto_stop_silence_seconds,
+            min_record_seconds=AUTO_STOP_MIN_RECORD_SECONDS,
+        )
+        self.auto_stop_triggered = False
+        self.auto_stop_reason = None
+
+    def report_activity(self, source_name, data, now=None):
+        with self.activity_lock:
+            detector = self.activity_detectors.get(source_name)
+            if detector is None:
+                return
+
+            self.source_active[source_name] = detector.update(
+                data,
+                self.profile["sample_rate"],
+                now=now,
+            )
+
+            if self.auto_stop_controller and self.auto_stop_controller.update(self.source_active, now=now):
+                self.request_auto_stop(self.auto_stop_controller.reason())
+
+    def request_auto_stop(self, reason):
+        if self.auto_stop_triggered:
+            return
+        self.auto_stop_triggered = True
+        self.auto_stop_reason = reason
+        self.stop_event.set()
+
+    def build_finish_metadata(self):
+        return {
+            "auto_stop_enabled": self.auto_stop_silence_seconds is not None,
+            "auto_stop_silence_seconds": self.auto_stop_silence_seconds,
+            "auto_stop_triggered": self.auto_stop_triggered,
+            "auto_stop_reason": self.auto_stop_reason,
+            "trim_silence_enabled": self.trim_silence,
+            "trim_silence_keep_seconds": TRIM_EDGE_SILENCE_SECONDS,
+            "trim_silence_applied": self.trim_silence_applied,
+            "trim_silence_removed_seconds": round(self.trim_silence_removed_seconds, 3),
+        }
 
     def _get_device(self, is_loopback):
         if is_loopback:
@@ -190,6 +582,7 @@ class AudioRecorder(threading.Thread):
             samplerate = self.profile["sample_rate"]
             channels = self.profile["channels"]
             subtype = self.profile["subtype"]
+            self._setup_auto_stop()
 
             # 1. Setup Recorders
             if self.source_mode == "both":
@@ -201,20 +594,60 @@ class AudioRecorder(threading.Thread):
                 t2 = tempfile.NamedTemporaryFile(suffix=".wav", delete=False).name
                 self.temp_files = [t1, t2]
                 
-                self.recorders.append(RawRecorder(dev_mic, t1, samplerate=samplerate, channels=channels, subtype=subtype))
-                self.recorders.append(RawRecorder(dev_loop, t2, samplerate=samplerate, channels=channels, subtype=subtype))
+                self.recorders.append(
+                    RawRecorder(
+                        dev_mic,
+                        t1,
+                        samplerate=samplerate,
+                        channels=channels,
+                        subtype=subtype,
+                        source_name="mic",
+                        on_audio_data=self.report_activity,
+                    )
+                )
+                self.recorders.append(
+                    RawRecorder(
+                        dev_loop,
+                        t2,
+                        samplerate=samplerate,
+                        channels=channels,
+                        subtype=subtype,
+                        source_name="loopback",
+                        on_audio_data=self.report_activity,
+                    )
+                )
                 
             elif self.source_mode == "loopback":
                 dev = self._get_device(is_loopback=True)
                 t1 = tempfile.NamedTemporaryFile(suffix=".wav", delete=False).name
                 self.temp_files = [t1]
-                self.recorders.append(RawRecorder(dev, t1, samplerate=samplerate, channels=channels, subtype=subtype))
+                self.recorders.append(
+                    RawRecorder(
+                        dev,
+                        t1,
+                        samplerate=samplerate,
+                        channels=channels,
+                        subtype=subtype,
+                        source_name="loopback",
+                        on_audio_data=self.report_activity,
+                    )
+                )
                 
             else: # mic
                 dev = self._get_device(is_loopback=False)
                 t1 = tempfile.NamedTemporaryFile(suffix=".wav", delete=False).name
                 self.temp_files = [t1]
-                self.recorders.append(RawRecorder(dev, t1, samplerate=samplerate, channels=channels, subtype=subtype))
+                self.recorders.append(
+                    RawRecorder(
+                        dev,
+                        t1,
+                        samplerate=samplerate,
+                        channels=channels,
+                        subtype=subtype,
+                        source_name="mic",
+                        on_audio_data=self.report_activity,
+                    )
+                )
 
             print(f"Starting recording mode: {self.source_mode}")
 
@@ -254,14 +687,69 @@ class AudioRecorder(threading.Thread):
                     try:
                         os.remove(t)
                     except: pass
-                
+
+            self.finish_metadata = self.build_finish_metadata()
+
             if self.callback:
                 self.callback(self.final_filepath, self.error_message)
 
     def stop(self):
         self.stop_event.set()
 
+    def _maybe_trim_temp_sources(self):
+        if not self.trim_silence:
+            self.trim_silence_applied = False
+            self.trim_silence_removed_seconds = 0.0
+            return
+
+        source_names = self._active_source_names()
+        source_paths = self.temp_files[:len(source_names)]
+        if not source_paths:
+            return
+
+        try:
+            loaded_sources = []
+            file_infos = []
+            samplerate = None
+
+            for source_name, path in zip(source_names, source_paths):
+                info = sf.info(path)
+                data, sr = sf.read(path, always_2d=True)
+                if samplerate is None:
+                    samplerate = sr
+                elif sr != samplerate:
+                    raise ValueError("Cannot trim audio with different sample rates.")
+                loaded_sources.append((source_name, data))
+                file_infos.append((path, info, data))
+
+            start_frame, end_frame, stats = calculate_trim_bounds_for_sources(
+                loaded_sources,
+                samplerate,
+            )
+
+            if stats["applied"]:
+                target_frames = max(0, end_frame - start_frame)
+                for path, info, data in file_infos:
+                    trimmed = np.zeros((target_frames, data.shape[1]), dtype=data.dtype)
+                    clip_start = min(max(start_frame, 0), len(data))
+                    clip_end = min(max(end_frame, 0), len(data))
+                    if clip_end > clip_start:
+                        segment = data[clip_start:clip_end]
+                        trimmed[:len(segment)] = segment
+                    sf.write(path, trimmed, samplerate, format=info.format, subtype=info.subtype)
+
+            self.trim_silence_applied = bool(stats["applied"])
+            self.trim_silence_removed_seconds = (
+                float(stats["start_removed_seconds"]) + float(stats["end_removed_seconds"])
+            )
+        except Exception as e:
+            print(f"Silence trim failed: {e}")
+            self.trim_silence_applied = False
+            self.trim_silence_removed_seconds = 0.0
+
     def _prepare_source_wav(self, subtype):
+        self._maybe_trim_temp_sources()
+
         if len(self.temp_files) == 2:
             if self.normalize:
                 self._normalize_audio(self.temp_files[0])
