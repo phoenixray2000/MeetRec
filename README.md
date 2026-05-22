@@ -42,8 +42,10 @@ It is designed to stay out of the way: configure it once, then start or stop rec
 
 ### Post-Processing
 
-- **Normalize Audio (Apply first)**: raises the main voice/body of each source before mixing and limits sharp peaks.
-- **Silence trim**: optional post-processing that trims only the start and end silence beyond 5 seconds, using the same mic/loopback activity detection rules as silence auto-stop.
+- **Reduce speaker echo (Both mode)**: uses system audio as a reference to subtract speaker leakage from the microphone track. Processed in 15-second blocks with per-block delay tracking, so it follows clock drift between the two capture streams.
+- **Reduce microphone noise (RNNoise)**: applies RNNoise speech denoising to the microphone track after echo suppression and before leveling. Requires `rnnoise.dll`; if the library is unavailable, recording still succeeds and denoising is skipped.
+- **Normalize Audio**: in Both mode this performs per-source leveling (microphone and system audio are each raised toward a target level using an energy floor, so quiet microphone speech is not buried by louder system audio); single-source recordings keep whole-track normalization.
+- **Silence trim**: optional final post-processing that trims only the start and end silence beyond 5 seconds, applied to the final mixed output rather than the raw sources.
 - **Copy File to Clipboard**: copy the completed recording to the clipboard.
 - **Delete after Copy (Move to Temp)**: move the file to the temp folder after copying, keeping the output folder clean.
 
@@ -56,7 +58,7 @@ It is designed to stay out of the way: configure it once, then start or stop rec
 5. In **Output Configuration**, choose the folder, format, quality, and stereo mode.
 6. In **Tray Icon Behavior**, choose what left-click should record.
 7. In **Notifications**, decide whether tray notifications should be shown.
-8. In **Post-Processing & Clipboard**, enable normalization, edge-silence trim, clipboard copy, or delete-after-copy as needed.
+8. In **Post-Processing & Clipboard**, enable echo reduction, microphone noise reduction, source leveling/normalization, final edge-silence trim, clipboard copy, or delete-after-copy as needed.
 9. In **Global Hotkeys**, set hotkeys and decide whether record hotkeys should stop the active recording.
 10. Click **Save Settings**.
 
