@@ -929,7 +929,19 @@ class SettingsWindow(QMainWindow):
         group_post = QGroupBox("Post-Processing & Clipboard")
         group_post.setObjectName("postProcessingSettingsGroup")
         layout_post = QVBoxLayout()
-        self.chk_normalize = QCheckBox("Normalize Audio (Apply first)")
+        self.chk_normalize = QCheckBox("Normalize Audio")
+        self.chk_echo_suppression = QCheckBox("Reduce speaker echo (Both mode)")
+        self.chk_echo_suppression.setToolTip(
+            "Uses system audio as a reference to reduce speaker leakage from the "
+            "microphone track before noise reduction, leveling and mixing. Only "
+            "affects Both mode."
+        )
+        self.chk_noise_reduction = QCheckBox("Reduce microphone noise (RNNoise)")
+        self.chk_noise_reduction.setToolTip(
+            "Applies RNNoise speech denoising to the microphone track after echo "
+            "suppression and before leveling. Requires rnnoise.dll; silently skipped "
+            "if unavailable."
+        )
         self.chk_trim_silence = QCheckBox("Trim start/end silence over 5s")
         self.chk_trim_silence.setChecked(False)
         self.chk_clipboard = QCheckBox("Copy File to Clipboard")
@@ -939,6 +951,8 @@ class SettingsWindow(QMainWindow):
         self.chk_clipboard.toggled.connect(lambda c: self.chk_delete.setEnabled(c))
         
         layout_post.addWidget(self.chk_normalize)
+        layout_post.addWidget(self.chk_echo_suppression)
+        layout_post.addWidget(self.chk_noise_reduction)
         layout_post.addWidget(self.chk_trim_silence)
         layout_post.addWidget(self.chk_clipboard)
         layout_post.addWidget(self.chk_delete)
@@ -1068,7 +1082,13 @@ class SettingsWindow(QMainWindow):
             data.get("auto_stop_silence_seconds", AUTO_STOP_DEFAULT_SECONDS)
         )
 
-        self.chk_normalize.setChecked(data.get("normalize", False))
+        self.chk_normalize.setChecked(self._parse_bool_setting(data.get("normalize")))
+        self.chk_echo_suppression.setChecked(
+            self._parse_bool_setting(data.get("echo_suppression"))
+        )
+        self.chk_noise_reduction.setChecked(
+            self._parse_bool_setting(data.get("noise_reduction"))
+        )
         self.chk_trim_silence.setChecked(
             self._parse_bool_setting(data.get("trim_silence"))
         )
@@ -1128,6 +1148,8 @@ class SettingsWindow(QMainWindow):
             "show_notifications": self.chk_notifications.isChecked(),
             "show_recording_indicator": self.chk_recording_indicator.isChecked(),
             "normalize": self.chk_normalize.isChecked(),
+            "echo_suppression": self.chk_echo_suppression.isChecked(),
+            "noise_reduction": self.chk_noise_reduction.isChecked(),
             "trim_silence": self.chk_trim_silence.isChecked(),
             "clipboard": self.chk_clipboard.isChecked(),
             "delete_after": self.chk_delete.isChecked(),
@@ -1311,6 +1333,8 @@ class TrayApplication(QObject):
             quality=settings['quality'],
             stereo=settings['stereo'],
             normalize=settings['normalize'],
+            echo_suppression=settings.get("echo_suppression", False),
+            noise_reduction=settings.get("noise_reduction", False),
             trim_silence=settings.get("trim_silence", False),
             auto_stop_silence_seconds=settings.get("auto_stop_silence_seconds"),
             on_finish_callback=finish_callback
