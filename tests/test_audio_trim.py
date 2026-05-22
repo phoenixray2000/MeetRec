@@ -158,7 +158,7 @@ class AudioRecorderTrimIntegrationTests(unittest.TestCase):
                 INTEGRATION_REMOVED_SECONDS,
             )
 
-    def test_prepare_source_wav_applies_shared_bounds_before_both_mix(self):
+    def test_prepare_source_wav_trims_after_both_mix(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             mic_wav = os.path.join(temp_dir, "mic.wav")
             loopback_wav = os.path.join(temp_dir, "loopback.wav")
@@ -182,6 +182,7 @@ class AudioRecorderTrimIntegrationTests(unittest.TestCase):
             )
             recorder.temp_files = [mic_wav, loopback_wav]
 
+            # Both-mode silence trim now acts on the final mixed output.
             mixed_wav = recorder._prepare_source_wav("FLOAT")
             mixed, sr = sf.read(mixed_wav, always_2d=True)
 
