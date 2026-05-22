@@ -98,7 +98,7 @@ Install the runtime dependencies:
 pip install -r requirements.txt
 ```
 
-RNNoise microphone denoising requires `rnnoise.dll` in the repository root when running from source, or beside `MeetRec.exe` in the packaged app. Build it from `https://github.com/xiph/rnnoise` and copy the resulting DLL to `rnnoise.dll`; if the DLL is missing, MeetRec records normally and skips denoising.
+RNNoise microphone denoising requires `rnnoise.dll` in the repository root when running from source. Build it from `https://github.com/xiph/rnnoise` and copy the resulting DLL to `rnnoise.dll`; `MeetRec.spec` bundles it into the packaged app's internal runtime directory. If the DLL is missing, MeetRec records normally and skips denoising.
 
 Run tests:
 
