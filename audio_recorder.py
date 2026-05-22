@@ -8,6 +8,14 @@ import numpy as np
 import tempfile
 from collections import deque
 from app_metadata import RECORDING_FILENAME_PREFIX
+from audio_processing import (
+    EchoSuppressionConfig,
+    SourceLevelingConfig,
+    level_active_source,
+    suppress_reference_echo,
+)
+import denoise
+from denoise import NoiseReductionConfig
 
 FORMAT_CONFIG = {
     "wav": {
@@ -49,6 +57,10 @@ NORMALIZE_TARGET_LEVEL = 0.12
 NORMALIZE_MAX_GAIN = 8.0
 NORMALIZE_REFERENCE_PERCENTILE = 95
 NORMALIZE_LIMIT = 0.98
+ECHO_SUPPRESSION_DEFAULT_ENABLED = False
+NOISE_REDUCTION_DEFAULT_ENABLED = False
+NOISE_REDUCTION_MIX = 1.0
+SOURCE_LEVELING_MIN_ACTIVE_SECONDS = 0.5
 RAW_RECORDER_CHUNK_FRAMES = 2048
 
 AUTO_STOP_OFF = None
@@ -140,11 +152,11 @@ def normalize_auto_stop_silence_seconds(value):
     return AUTO_STOP_DEFAULT_SECONDS
 
 
-def normalize_trim_silence_enabled(value):
+def _normalize_bool_setting(value, default):
     if isinstance(value, bool):
         return value
     if value is None:
-        return TRIM_SILENCE_DEFAULT_ENABLED
+        return default
     if isinstance(value, str):
         normalized = value.strip().lower()
         if normalized in ("true", "1", "yes", "on"):
@@ -152,6 +164,18 @@ def normalize_trim_silence_enabled(value):
         if normalized in ("false", "0", "no", "off", ""):
             return False
     return bool(value)
+
+
+def normalize_trim_silence_enabled(value):
+    return _normalize_bool_setting(value, TRIM_SILENCE_DEFAULT_ENABLED)
+
+
+def normalize_echo_suppression_enabled(value):
+    return _normalize_bool_setting(value, ECHO_SUPPRESSION_DEFAULT_ENABLED)
+
+
+def normalize_noise_reduction_enabled(value):
+    return _normalize_bool_setting(value, NOISE_REDUCTION_DEFAULT_ENABLED)
 
 
 def build_recording_filename(timestamp, extension):
@@ -462,6 +486,8 @@ class AudioRecorder(threading.Thread):
         quality="balanced",
         stereo=False,
         normalize=False,
+        echo_suppression=ECHO_SUPPRESSION_DEFAULT_ENABLED,
+        noise_reduction=NOISE_REDUCTION_DEFAULT_ENABLED,
         trim_silence=TRIM_SILENCE_DEFAULT_ENABLED,
         auto_stop_silence_seconds=AUTO_STOP_DEFAULT_SECONDS,
         on_finish_callback=None,
@@ -475,6 +501,8 @@ class AudioRecorder(threading.Thread):
         self.stereo = bool(stereo)
         self.profile = build_output_profile(self.output_format, self.quality, self.stereo)
         self.normalize = normalize
+        self.echo_suppression = normalize_echo_suppression_enabled(echo_suppression)
+        self.noise_reduction = normalize_noise_reduction_enabled(noise_reduction)
         self.trim_silence = normalize_trim_silence_enabled(trim_silence)
         self.auto_stop_silence_seconds = normalize_auto_stop_silence_seconds(auto_stop_silence_seconds)
         self.callback = on_finish_callback
@@ -495,6 +523,12 @@ class AudioRecorder(threading.Thread):
         self.auto_stop_reason = None
         self.trim_silence_applied = False
         self.trim_silence_removed_seconds = 0.0
+        self.echo_suppression_applied = False
+        self.echo_suppression_reason = "not_run"
+        self.echo_suppression_stats = {}
+        self.noise_reduction_applied = False
+        self.noise_reduction_reason = "not_run"
+        self.source_leveling_stats = {}
         self.finish_metadata = self.build_finish_metadata()
 
     def _active_source_names(self):
@@ -553,6 +587,16 @@ class AudioRecorder(threading.Thread):
             "trim_silence_keep_seconds": TRIM_EDGE_SILENCE_SECONDS,
             "trim_silence_applied": self.trim_silence_applied,
             "trim_silence_removed_seconds": round(self.trim_silence_removed_seconds, 3),
+            "echo_suppression_enabled": self.echo_suppression,
+            "echo_suppression_applied": self.echo_suppression_applied,
+            "echo_suppression_reason": self.echo_suppression_reason,
+            "echo_suppression_stats": self.echo_suppression_stats,
+            "noise_reduction_enabled": self.noise_reduction,
+            "noise_reduction_available": denoise.is_available(),
+            "noise_reduction_applied": self.noise_reduction_applied,
+            "noise_reduction_reason": self.noise_reduction_reason,
+            "source_leveling_enabled": bool(self.normalize),
+            "source_leveling_stats": self.source_leveling_stats,
         }
 
     def _get_device(self, is_loopback):
@@ -747,33 +791,170 @@ class AudioRecorder(threading.Thread):
             self.trim_silence_applied = False
             self.trim_silence_removed_seconds = 0.0
 
-    def _prepare_source_wav(self, subtype):
-        self._maybe_trim_temp_sources()
+    def _build_leveling_mask(self, data):
+        audio = np.asarray(data, dtype=np.float32)
+        if audio.ndim == 1:
+            audio = audio.reshape(-1, 1)
+        return np.max(np.abs(audio), axis=1) >= NORMALIZE_ACTIVE_FLOOR
 
-        if len(self.temp_files) == 2:
-            if self.normalize:
-                self._normalize_audio(self.temp_files[0])
-                self._normalize_audio(self.temp_files[1])
+    def _level_source_data(self, data, samplerate, source_name):
+        mask = self._build_leveling_mask(data)
+        leveled, stats = level_active_source(
+            data,
+            mask,
+            SourceLevelingConfig(
+                enabled=bool(self.normalize),
+                active_floor=NORMALIZE_ACTIVE_FLOOR,
+                target_level=NORMALIZE_TARGET_LEVEL,
+                max_gain=NORMALIZE_MAX_GAIN,
+                limit=NORMALIZE_LIMIT,
+                reference_percentile=NORMALIZE_REFERENCE_PERCENTILE,
+                min_active_seconds=SOURCE_LEVELING_MIN_ACTIVE_SECONDS,
+                samplerate=samplerate,
+            ),
+        )
+        self.source_leveling_stats[source_name] = stats
+        return leveled
 
-            mixed_wav = tempfile.NamedTemporaryFile(suffix=".wav", delete=False).name
-            self._mix_audio(
-                self.temp_files[0],
-                self.temp_files[1],
-                mixed_wav,
-                subtype,
-                limit_output=self.normalize,
+    def _denoise_mic_data(self, data, samplerate):
+        cleaned, stats = denoise.reduce_noise(
+            data,
+            samplerate,
+            NoiseReductionConfig(
+                enabled=self.noise_reduction,
+                mix=NOISE_REDUCTION_MIX,
+            ),
+        )
+        self.noise_reduction_applied = bool(stats.get("applied"))
+        self.noise_reduction_reason = str(stats.get("reason", "unknown"))
+        return cleaned
+
+    def _mix_audio_data(self, d1, d2, out_file, samplerate, subtype, limit_output=False):
+        if d1.shape[1] != d2.shape[1]:
+            raise ValueError("Cannot mix audio with different channel counts.")
+
+        max_len = max(len(d1), len(d2))
+        if len(d1) < max_len:
+            d1 = np.concatenate(
+                (d1, np.zeros((max_len - len(d1), d1.shape[1]), dtype=d1.dtype))
             )
-            self.temp_files.append(mixed_wav) # Mark for cleanup
+        if len(d2) < max_len:
+            d2 = np.concatenate(
+                (d2, np.zeros((max_len - len(d2), d2.shape[1]), dtype=d2.dtype))
+            )
 
-            if self.normalize:
-                self._limit_audio(mixed_wav)
+        mixed = d1 + d2
+        if limit_output:
+            mixed = self._apply_limiter(mixed)
+        else:
+            mixed = np.clip(mixed, -1.0, 1.0)
+        sf.write(out_file, mixed, samplerate, format="WAV", subtype=subtype)
 
-            return mixed_wav
+    def _prepare_both_source_wav(self, subtype):
+        mic_wav, loopback_wav = self.temp_files[:2]
+        mic_info = sf.info(mic_wav)
+        loopback_info = sf.info(loopback_wav)
+        mic_data, mic_sr = sf.read(mic_wav, always_2d=True)
+        loopback_data, loopback_sr = sf.read(loopback_wav, always_2d=True)
+
+        if mic_sr != loopback_sr:
+            raise ValueError("Cannot mix audio with different sample rates.")
+        if mic_data.shape[1] != loopback_data.shape[1]:
+            raise ValueError("Cannot mix audio with different channel counts.")
+
+        self.source_leveling_stats = {}
+        if self.echo_suppression:
+            mic_data, echo_stats = suppress_reference_echo(
+                mic_data,
+                loopback_data,
+                mic_sr,
+                EchoSuppressionConfig(enabled=True),
+            )
+            self.echo_suppression_applied = bool(echo_stats.get("applied"))
+            self.echo_suppression_reason = str(echo_stats.get("reason", "unknown"))
+            self.echo_suppression_stats = echo_stats
+        else:
+            self.echo_suppression_applied = False
+            self.echo_suppression_reason = "disabled"
+            self.echo_suppression_stats = {}
+
+        mic_data = self._denoise_mic_data(mic_data, mic_sr)
+        mic_data = self._level_source_data(mic_data, mic_sr, "mic")
+        loopback_data = self._level_source_data(loopback_data, loopback_sr, "loopback")
+
+        mixed_wav = tempfile.NamedTemporaryFile(suffix=".wav", delete=False).name
+        output_subtype = subtype or mic_info.subtype or loopback_info.subtype
+        self._mix_audio_data(
+            mic_data,
+            loopback_data,
+            mixed_wav,
+            mic_sr,
+            output_subtype,
+            limit_output=bool(self.normalize),
+        )
+        self.temp_files.append(mixed_wav)
+        return mixed_wav
+
+    def _maybe_trim_final_wav(self, source_wav):
+        if not self.trim_silence:
+            self.trim_silence_applied = False
+            self.trim_silence_removed_seconds = 0.0
+            return source_wav
+
+        try:
+            info = sf.info(source_wav)
+            data, samplerate = sf.read(source_wav, always_2d=True)
+            trim_source_name = "loopback" if self.source_mode == "loopback" else "mic"
+            trimmed, stats = trim_edge_silence_data(
+                data,
+                samplerate,
+                source_name=trim_source_name,
+            )
+            if stats["applied"]:
+                trimmed_wav = tempfile.NamedTemporaryFile(suffix=".wav", delete=False).name
+                sf.write(trimmed_wav, trimmed, samplerate, format=info.format, subtype=info.subtype)
+                self.temp_files.append(trimmed_wav)
+                self.trim_silence_applied = True
+                self.trim_silence_removed_seconds = (
+                    float(stats["start_removed_seconds"]) + float(stats["end_removed_seconds"])
+                )
+                return trimmed_wav
+
+            self.trim_silence_applied = False
+            self.trim_silence_removed_seconds = 0.0
+            return source_wav
+        except Exception as e:
+            print(f"Final silence trim failed: {e}")
+            self.trim_silence_applied = False
+            self.trim_silence_removed_seconds = 0.0
+            return source_wav
+
+    def _prepare_source_wav(self, subtype):
+        if len(self.temp_files) == 2:
+            mixed = self._prepare_both_source_wav(subtype)
+            return self._maybe_trim_final_wav(mixed)
+
+        self.echo_suppression_applied = False
+        self.echo_suppression_reason = "single_source"
+        self.echo_suppression_stats = {}
+        self.source_leveling_stats = {}
 
         source_wav = self.temp_files[0]
+        if self.source_mode == "mic" and self.noise_reduction:
+            data, sr = sf.read(source_wav, always_2d=True)
+            info = sf.info(source_wav)
+            cleaned = self._denoise_mic_data(data, sr)
+            denoised_wav = tempfile.NamedTemporaryFile(suffix=".wav", delete=False).name
+            sf.write(denoised_wav, cleaned, sr, format=info.format, subtype=info.subtype)
+            self.temp_files.append(denoised_wav)
+            source_wav = denoised_wav
+        else:
+            self.noise_reduction_applied = False
+            self.noise_reduction_reason = "disabled" if not self.noise_reduction else "not_mic_source"
+
         if self.normalize:
             self._normalize_audio(source_wav)
-        return source_wav
+        return self._maybe_trim_final_wav(source_wav)
 
     def _mix_audio(self, file1, file2, out_file, subtype, limit_output=False):
         d1, sr1 = sf.read(file1, always_2d=True)

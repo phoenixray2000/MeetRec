@@ -338,6 +338,69 @@ class OutputProfileTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             build_output_profile("flac", "studio", stereo=False)
 
+    def test_both_mode_suppresses_echo_then_levels(self):
+        import os
+        import tempfile
+
+        import numpy as np
+        import soundfile as sf
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            sr = 16000
+            frames = sr * 20
+            rng = np.random.default_rng(99)
+            loopback = rng.normal(0.0, 0.05, size=(frames, 1)).astype(np.float32)
+            voice = np.zeros((frames, 1), dtype=np.float32)
+            voice[sr * 2:sr * 4] = 0.02
+            delay = int(0.05 * sr)
+            leak = np.zeros_like(loopback)
+            leak[delay:] = loopback[:-delay] * 0.5
+            mic = voice + leak
+
+            mic_file = os.path.join(temp_dir, "mic.wav")
+            loop_file = os.path.join(temp_dir, "loop.wav")
+            sf.write(mic_file, mic, sr, format="WAV", subtype="FLOAT")
+            sf.write(loop_file, loopback, sr, format="WAV", subtype="FLOAT")
+
+            recorder = self._make_recorder("wav", "balanced", stereo=False)
+            recorder.source_mode = "both"
+            recorder.normalize = True
+            recorder.echo_suppression = True
+            recorder.noise_reduction = False
+            recorder.temp_files = [mic_file, loop_file]
+
+            mixed_file = recorder._prepare_source_wav("FLOAT")
+            mixed, _ = sf.read(mixed_file, always_2d=True)
+
+            self.assertTrue(recorder.echo_suppression_applied)
+            self.assertLessEqual(np.max(np.abs(mixed)), 0.981)
+
+    def test_both_mode_ignores_echo_for_single_source(self):
+        import os
+        import tempfile
+
+        import numpy as np
+        import soundfile as sf
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            sr = 16000
+            mic_file = os.path.join(temp_dir, "mic.wav")
+            sf.write(mic_file, np.full((sr, 1), 0.02, dtype=np.float32), sr,
+                     format="WAV", subtype="FLOAT")
+
+            recorder = self._make_recorder("wav", "balanced", stereo=False)
+            recorder.source_mode = "mic"
+            recorder.normalize = False
+            recorder.echo_suppression = True
+            recorder.noise_reduction = False
+            recorder.temp_files = [mic_file]
+
+            prepared = recorder._prepare_source_wav("FLOAT")
+
+            self.assertEqual(prepared, mic_file)
+            self.assertFalse(recorder.echo_suppression_applied)
+            self.assertEqual(recorder.echo_suppression_reason, "single_source")
+
     def _make_recorder(self, fmt, quality, stereo):
         from audio_recorder import AudioRecorder
 
