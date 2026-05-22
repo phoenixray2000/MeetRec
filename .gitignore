@@ -18,6 +18,10 @@ dist/
 *.spec
 !MeetRec.spec
 *.exe
+rnnoise.dll
+rnnoise.exp
+rnnoise.lib
+.deps/
 
 # User Settings
 settings.json

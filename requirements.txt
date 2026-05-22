@@ -1,0 +1,8 @@
+soundcard
+soundfile
+numpy
+scipy
+lameenc
+PyQt6
+keyboard
+pyinstaller

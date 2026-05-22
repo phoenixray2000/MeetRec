@@ -10,6 +10,12 @@ class PackagingSpecTests(unittest.TestCase):
         self.assertIn("COLLECT(", spec_text)
         self.assertIn("name='MeetRec'", spec_text)
 
+    def test_meetrec_spec_bundles_rnnoise_when_available(self):
+        spec_text = Path("MeetRec.spec").read_text(encoding="utf-8")
+
+        self.assertIn('"rnnoise.dll"', spec_text)
+        self.assertIn("binaries=_binaries", spec_text)
+
 
 if __name__ == "__main__":
     unittest.main()

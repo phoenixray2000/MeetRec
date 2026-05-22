@@ -6,6 +6,8 @@ import sys
 
 
 sys.path.insert(0, os.getcwd())
+_rnnoise_dll = os.path.join(os.getcwd(), "rnnoise.dll")
+_binaries = [(_rnnoise_dll, ".")] if os.path.exists(_rnnoise_dll) else []
 
 from app_metadata import APP_ICON_FILENAME, ICON_IDLE_FILENAME, ICON_RECORDING_FILENAME
 
@@ -13,7 +15,7 @@ from app_metadata import APP_ICON_FILENAME, ICON_IDLE_FILENAME, ICON_RECORDING_F
 a = Analysis(
     ['main.py'],
     pathex=[],
-    binaries=[],
+    binaries=_binaries,
     datas=[
         (ICON_IDLE_FILENAME, 'docs'),
         (ICON_RECORDING_FILENAME, 'docs'),

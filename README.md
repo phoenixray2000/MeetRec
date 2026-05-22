@@ -87,6 +87,7 @@ Keep the whole `dist\MeetRec` folder together. This package layout avoids the ex
 - soundcard
 - soundfile
 - numpy
+- scipy
 - lameenc
 - keyboard
 - pyinstaller
@@ -94,8 +95,10 @@ Keep the whole `dist\MeetRec` folder together. This package layout avoids the ex
 Install the runtime dependencies:
 
 ```powershell
-pip install PyQt6 soundcard soundfile numpy lameenc keyboard pyinstaller
+pip install -r requirements.txt
 ```
+
+RNNoise microphone denoising requires `rnnoise.dll` in the repository root when running from source, or beside `MeetRec.exe` in the packaged app. Build it from `https://github.com/xiph/rnnoise` and copy the resulting DLL to `rnnoise.dll`; if the DLL is missing, MeetRec records normally and skips denoising.
 
 Run tests:
 
