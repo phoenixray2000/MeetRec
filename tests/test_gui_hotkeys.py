@@ -266,15 +266,27 @@ class SettingsWindowRecordingIndicatorTests(unittest.TestCase):
         self.assertIsNotNone(post_group)
         self.assertIs(window.chk_trim_silence.parentWidget(), post_group)
 
-    def test_echo_suppression_setting_defaults_off(self):
+    def test_post_processing_defaults_enable_normalize_echo_and_ducking(self):
         window = self.make_window({})
 
-        self.assertIs(window.get_settings()["echo_suppression"], False)
+        settings = window.get_settings()
+
+        self.assertIs(settings["normalize"], True)
+        self.assertIs(settings["echo_suppression"], True)
+        self.assertIs(settings["ducking"], True)
+        self.assertIs(settings["noise_reduction"], False)
 
     def test_echo_suppression_setting_can_be_enabled(self):
         window = self.make_window({"echo_suppression": True})
 
         self.assertIs(window.get_settings()["echo_suppression"], True)
+
+    def test_ducking_setting_can_be_disabled(self):
+        window = self.make_window({"ducking": False})
+
+        settings = window.get_settings()
+
+        self.assertIs(settings["ducking"], False)
 
     def test_noise_reduction_setting_defaults_off(self):
         window = self.make_window({})
@@ -293,6 +305,7 @@ class SettingsWindowRecordingIndicatorTests(unittest.TestCase):
 
         self.assertIs(window.chk_echo_suppression.parentWidget(), post_group)
         self.assertIs(window.chk_noise_reduction.parentWidget(), post_group)
+        self.assertIs(window.chk_ducking.parentWidget(), post_group)
 
     def test_debug_audio_pipeline_setting_defaults_off(self):
         window = self.make_window({})
@@ -634,6 +647,7 @@ class TrayApplicationRecordingIndicatorTests(unittest.TestCase):
                     "normalize": True,
                     "echo_suppression": True,
                     "noise_reduction": True,
+                    "ducking": True,
                     "debug_audio_pipeline": True,
                     "trim_silence": True,
                     "auto_stop_silence_seconds": 600,
@@ -706,6 +720,7 @@ class TrayApplicationRecordingIndicatorTests(unittest.TestCase):
 
         self.assertEqual(AudioRecorder.call_args.kwargs["echo_suppression"], True)
         self.assertEqual(AudioRecorder.call_args.kwargs["noise_reduction"], True)
+        self.assertEqual(AudioRecorder.call_args.kwargs["ducking"], True)
 
     def test_start_recording_passes_debug_audio_pipeline_setting(self):
         subject, _indicator = self.make_subject(show_indicator=True)

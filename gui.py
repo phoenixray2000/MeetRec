@@ -37,6 +37,10 @@ from audio_recorder import (
 from clipboard_utils import copy_file_to_clipboard
 
 CONFIG_FILE = "settings.json"
+NORMALIZE_DEFAULT_ENABLED = True
+ECHO_SUPPRESSION_UI_DEFAULT_ENABLED = True
+NOISE_REDUCTION_UI_DEFAULT_ENABLED = False
+DUCKING_DEFAULT_ENABLED = True
 
 def resource_path(relative_path):
     try:
@@ -942,6 +946,12 @@ class SettingsWindow(QMainWindow):
             "suppression and before leveling. Requires rnnoise.dll; silently skipped "
             "if unavailable."
         )
+        self.chk_ducking = QCheckBox("Lower system audio while microphone is active")
+        self.chk_ducking.setToolTip(
+            "In Both mode, automatically lowers the loopback track while the "
+            "microphone track is active so local speech stays intelligible. "
+            "This does not change microphone recordings or loopback-only recordings."
+        )
         self.chk_debug_audio_pipeline = QCheckBox("Save debug audio pipeline")
         self.chk_debug_audio_pipeline.setToolTip(
             "Writes raw and intermediate WAV files next to each recording so echo "
@@ -958,6 +968,7 @@ class SettingsWindow(QMainWindow):
         layout_post.addWidget(self.chk_normalize)
         layout_post.addWidget(self.chk_echo_suppression)
         layout_post.addWidget(self.chk_noise_reduction)
+        layout_post.addWidget(self.chk_ducking)
         layout_post.addWidget(self.chk_debug_audio_pipeline)
         layout_post.addWidget(self.chk_trim_silence)
         layout_post.addWidget(self.chk_clipboard)
@@ -1088,12 +1099,21 @@ class SettingsWindow(QMainWindow):
             data.get("auto_stop_silence_seconds", AUTO_STOP_DEFAULT_SECONDS)
         )
 
-        self.chk_normalize.setChecked(self._parse_bool_setting(data.get("normalize")))
+        self.chk_normalize.setChecked(
+            self._parse_bool_setting(data.get("normalize", NORMALIZE_DEFAULT_ENABLED))
+        )
         self.chk_echo_suppression.setChecked(
-            self._parse_bool_setting(data.get("echo_suppression"))
+            self._parse_bool_setting(
+                data.get("echo_suppression", ECHO_SUPPRESSION_UI_DEFAULT_ENABLED)
+            )
         )
         self.chk_noise_reduction.setChecked(
-            self._parse_bool_setting(data.get("noise_reduction"))
+            self._parse_bool_setting(
+                data.get("noise_reduction", NOISE_REDUCTION_UI_DEFAULT_ENABLED)
+            )
+        )
+        self.chk_ducking.setChecked(
+            self._parse_bool_setting(data.get("ducking", DUCKING_DEFAULT_ENABLED))
         )
         self.chk_debug_audio_pipeline.setChecked(
             self._parse_bool_setting(data.get("debug_audio_pipeline"))
@@ -1159,6 +1179,7 @@ class SettingsWindow(QMainWindow):
             "normalize": self.chk_normalize.isChecked(),
             "echo_suppression": self.chk_echo_suppression.isChecked(),
             "noise_reduction": self.chk_noise_reduction.isChecked(),
+            "ducking": self.chk_ducking.isChecked(),
             "debug_audio_pipeline": self.chk_debug_audio_pipeline.isChecked(),
             "trim_silence": self.chk_trim_silence.isChecked(),
             "clipboard": self.chk_clipboard.isChecked(),
@@ -1349,6 +1370,7 @@ class TrayApplication(QObject):
             normalize=settings['normalize'],
             echo_suppression=settings.get("echo_suppression", False),
             noise_reduction=settings.get("noise_reduction", False),
+            ducking=settings.get("ducking", True),
             debug_audio_pipeline=settings.get("debug_audio_pipeline", False),
             trim_silence=settings.get("trim_silence", False),
             auto_stop_silence_seconds=settings.get("auto_stop_silence_seconds"),
