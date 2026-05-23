@@ -3,9 +3,18 @@
 **MeetRec** is a lightweight Windows tray recorder for meetings, calls, microphone audio, system audio, or both at the same time.
 It is designed to stay out of the way: configure it once, then start or stop recordings from the tray icon, a global hotkey, or the floating timer.
 
+Current version: **1.0.0**.
+
 ![MeetRec settings](docs/meetrec-settings.png)
 
 ![MeetRec floating recording timer](docs/meetrec-floating-timer.png)
+
+## What's New In 1.0
+
+- Independent post-processing switches for normalization/source leveling, speaker echo reduction, microphone denoising, and loopback ducking.
+- Smarter Both-mode mixing: microphone echo is reduced first, microphone and system audio are leveled from active audio segments, and loopback audio is ducked while the microphone is active.
+- Conservative RNNoise support for microphone denoising, using a 35% wet mix with latency compensation to reduce word clipping.
+- Windows package metadata now reports MeetRec version `1.0.0` in the executable.
 
 ## Features
 
@@ -64,6 +73,8 @@ It is designed to stay out of the way: configure it once, then start or stop rec
 10. Click **Save Settings**.
 
 ## Packaging
+
+Published builds are available from [GitHub Releases](https://github.com/phoenixray2000/MeetRec/releases).
 
 The maintained package is an onedir build:
 

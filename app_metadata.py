@@ -1,5 +1,8 @@
 APP_NAME = "MeetRec"
 ORGANIZATION_NAME = "MeetRec"
+APP_VERSION = "1.0.0"
+WINDOWS_FILE_VERSION = (1, 0, 0, 0)
+WINDOWS_PRODUCT_VERSION = (1, 0, 0, 0)
 
 SETTINGS_WINDOW_TITLE = f"Settings - {APP_NAME}"
 TRAY_IDLE_TOOLTIP = f"{APP_NAME} (Idle)"
@@ -9,6 +12,7 @@ READY_MESSAGE_BODY = f"{APP_NAME} is ready. Left-click to toggle recording."
 EXECUTABLE_NAME = "MeetRec"
 EXECUTABLE_FILENAME = f"{EXECUTABLE_NAME}.exe"
 RELEASES_URL = "https://github.com/phoenixray2000/MeetRec/releases"
+VERSION_RESOURCE_FILENAME = "version_info.txt"
 SINGLE_INSTANCE_LOCK_FILENAME = f"{APP_NAME}.lock"
 
 RECORDING_FILENAME_PREFIX = "MeetRec"
