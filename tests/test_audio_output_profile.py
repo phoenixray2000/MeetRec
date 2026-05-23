@@ -473,35 +473,6 @@ class OutputProfileTests(unittest.TestCase):
             self.assertFalse(recorder.echo_suppression_applied)
             self.assertEqual(recorder.echo_suppression_reason, "single_source")
 
-    def test_mic_reference_mode_outputs_mic_without_loopback_mix(self):
-        import os
-        import tempfile
-
-        import numpy as np
-        import soundfile as sf
-
-        with tempfile.TemporaryDirectory() as temp_dir:
-            sr = 16000
-            mic_file = os.path.join(temp_dir, "mic.wav")
-            loop_file = os.path.join(temp_dir, "loop.wav")
-            mic = np.full((sr, 1), 0.02, dtype=np.float32)
-            loopback = np.full((sr, 1), 0.25, dtype=np.float32)
-            sf.write(mic_file, mic, sr, format="WAV", subtype="FLOAT")
-            sf.write(loop_file, loopback, sr, format="WAV", subtype="FLOAT")
-
-            recorder = self._make_recorder("wav", "balanced", stereo=False)
-            recorder.source_mode = "mic_reference"
-            recorder.normalize = False
-            recorder.echo_suppression = False
-            recorder.noise_reduction = False
-            recorder.temp_files = [mic_file, loop_file]
-
-            prepared = recorder._prepare_source_wav("FLOAT")
-            output, _ = sf.read(prepared, always_2d=True)
-
-            self.assertAlmostEqual(float(np.median(output[:, 0])), 0.02, places=5)
-            self.assertLess(float(np.max(output[:, 0])), 0.03)
-
     def test_both_mode_ducks_loopback_after_source_leveling_when_enabled(self):
         import os
         import tempfile
@@ -533,82 +504,16 @@ class OutputProfileTests(unittest.TestCase):
             self.assertEqual(recorder.ducking_reason, "applied")
             self.assertLess(recorder.ducking_stats["min_gain"], 0.5)
 
-    def test_metadata_sidecar_records_pipeline_state(self):
-        import json
-        import os
-        import tempfile
+    def test_recorder_excludes_debug_artifact_interfaces(self):
+        recorder = self._make_recorder("flac", "balanced", stereo=False)
 
-        with tempfile.TemporaryDirectory() as temp_dir:
-            final_path = os.path.join(temp_dir, "MeetRec_test.flac")
-            recorder = self._make_recorder("flac", "balanced", stereo=False)
-            recorder.source_mode = "both"
-            recorder.echo_suppression = True
-            recorder.noise_reduction = True
-            recorder.debug_audio_pipeline = True
-            recorder.echo_suppression_applied = True
-            recorder.echo_suppression_reason = "applied"
-            recorder.echo_suppression_stats = {"blocks_total": 2}
-            recorder.source_leveling_stats = {"mic": {"gain": 2.0}}
-            recorder.ducking = True
-            recorder.ducking_applied = True
-            recorder.ducking_reason = "applied"
-            recorder.ducking_stats = {"reduction_db": 9.0}
+        metadata = recorder.build_finish_metadata()
 
-            sidecar = recorder._write_metadata_sidecar(final_path)
-
-            with open(sidecar, "r", encoding="utf-8") as fh:
-                metadata = json.load(fh)
-            self.assertEqual(sidecar, os.path.join(temp_dir, "MeetRec_test.json"))
-            self.assertEqual(metadata["final_filepath"], final_path)
-            self.assertEqual(metadata["source_mode"], "both")
-            self.assertEqual(metadata["echo_suppression_reason"], "applied")
-            self.assertEqual(metadata["echo_suppression_stats"], {"blocks_total": 2})
-            self.assertEqual(metadata["source_leveling_stats"], {"mic": {"gain": 2.0}})
-            self.assertTrue(metadata["ducking_enabled"])
-            self.assertTrue(metadata["ducking_applied"])
-            self.assertEqual(metadata["ducking_reason"], "applied")
-            self.assertEqual(metadata["ducking_stats"], {"reduction_db": 9.0})
-            self.assertTrue(metadata["debug_audio_pipeline_enabled"])
-
-    def test_debug_pipeline_exports_intermediate_tracks(self):
-        import os
-        import tempfile
-
-        import numpy as np
-        import soundfile as sf
-
-        with tempfile.TemporaryDirectory() as temp_dir:
-            sr = 16000
-            mic_file = os.path.join(temp_dir, "mic.wav")
-            loop_file = os.path.join(temp_dir, "loop.wav")
-            sf.write(mic_file, np.full((sr, 1), 0.02, dtype=np.float32), sr,
-                     format="WAV", subtype="FLOAT")
-            sf.write(loop_file, np.full((sr, 1), 0.01, dtype=np.float32), sr,
-                     format="WAV", subtype="FLOAT")
-
-            recorder = self._make_recorder("wav", "balanced", stereo=False)
-            recorder.source_mode = "both"
-            recorder.normalize = True
-            recorder.echo_suppression = False
-            recorder.noise_reduction = False
-            recorder.ducking = True
-            recorder.debug_audio_pipeline = True
-            recorder.temp_files = [mic_file, loop_file]
-
-            recorder._prepare_source_wav("FLOAT")
-            debug_dir = recorder._export_debug_audio_artifacts(
-                os.path.join(temp_dir, "MeetRec_test.wav")
-            )
-
-            self.assertTrue(os.path.isdir(debug_dir))
-            exported = set(os.listdir(debug_dir))
-            self.assertIn("01_raw_mic.wav", exported)
-            self.assertIn("02_raw_loopback.wav", exported)
-            self.assertIn("03_aec_mic.wav", exported)
-            self.assertIn("04_denoised_mic.wav", exported)
-            self.assertIn("05_leveled_mic.wav", exported)
-            self.assertIn("06_ducked_loopback.wav", exported)
-            self.assertIn("07_mixed_pre_trim.wav", exported)
+        self.assertFalse(hasattr(recorder, "debug_audio_pipeline"))
+        self.assertFalse(hasattr(recorder, "_write_metadata_sidecar"))
+        self.assertFalse(hasattr(recorder, "_export_debug_audio_artifacts"))
+        self.assertNotIn("debug_audio_pipeline_enabled", metadata)
+        self.assertNotIn("debug_audio_dir", metadata)
 
     def _make_recorder(self, fmt, quality, stereo):
         from audio_recorder import AudioRecorder

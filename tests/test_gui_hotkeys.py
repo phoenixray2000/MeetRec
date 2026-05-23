@@ -307,15 +307,21 @@ class SettingsWindowRecordingIndicatorTests(unittest.TestCase):
         self.assertIs(window.chk_noise_reduction.parentWidget(), post_group)
         self.assertIs(window.chk_ducking.parentWidget(), post_group)
 
-    def test_debug_audio_pipeline_setting_defaults_off(self):
+    def test_post_processing_excludes_debug_audio_pipeline_setting(self):
         window = self.make_window({})
 
-        self.assertIs(window.get_settings()["debug_audio_pipeline"], False)
+        self.assertFalse(hasattr(window, "chk_debug_audio_pipeline"))
+        self.assertNotIn("debug_audio_pipeline", window.get_settings())
 
-    def test_debug_audio_pipeline_setting_can_be_enabled(self):
-        window = self.make_window({"debug_audio_pipeline": True})
+    def test_left_click_modes_exclude_mic_reference(self):
+        window = self.make_window({})
 
-        self.assertIs(window.get_settings()["debug_audio_pipeline"], True)
+        modes = [
+            window.combo_left_click.itemText(index)
+            for index in range(window.combo_left_click.count())
+        ]
+
+        self.assertEqual(modes, ["Last Used", "Microphone", "Loopback", "Both"])
 
     def test_launch_at_startup_setting_defaults_off(self):
         window = self.make_window({})
@@ -437,15 +443,18 @@ class TrayApplicationMenuTests(unittest.TestCase):
 
         self.assertIs(subject.recording_indicator.context_menu, subject.menu)
 
-    def test_mic_reference_menu_action_starts_reference_mode(self):
+    def test_build_menu_excludes_mic_reference_action(self):
         subject = self.make_subject()
-        started = []
-        subject.start_recording = lambda mode: started.append(mode)
 
         TrayApplication.build_menu(subject)
-        subject.action_record_mic_reference.trigger()
+        action_texts = [
+            action.text()
+            for action in subject.menu.actions()
+            if not action.isSeparator()
+        ]
 
-        self.assertEqual(started, ["mic_reference"])
+        self.assertNotIn("Start Recording (Mic + Echo Reference)", action_texts)
+        self.assertFalse(hasattr(subject, "action_record_mic_reference"))
 
 
 class TrayApplicationHotkeyTests(unittest.TestCase):
@@ -648,7 +657,6 @@ class TrayApplicationRecordingIndicatorTests(unittest.TestCase):
                     "echo_suppression": True,
                     "noise_reduction": True,
                     "ducking": True,
-                    "debug_audio_pipeline": True,
                     "trim_silence": True,
                     "auto_stop_silence_seconds": 600,
                     "show_recording_indicator": show_indicator,
@@ -661,7 +669,6 @@ class TrayApplicationRecordingIndicatorTests(unittest.TestCase):
             action_record_mic=SimpleNamespace(setEnabled=lambda enabled: None),
             action_record_loop=SimpleNamespace(setEnabled=lambda enabled: None),
             action_record_both=SimpleNamespace(setEnabled=lambda enabled: None),
-            action_record_mic_reference=SimpleNamespace(setEnabled=lambda enabled: None),
             action_stop=SimpleNamespace(setEnabled=lambda enabled: None),
             tray_icon=FakeTrayIcon(),
             icon_rec_path="recording.ico",
@@ -722,13 +729,13 @@ class TrayApplicationRecordingIndicatorTests(unittest.TestCase):
         self.assertEqual(AudioRecorder.call_args.kwargs["noise_reduction"], True)
         self.assertEqual(AudioRecorder.call_args.kwargs["ducking"], True)
 
-    def test_start_recording_passes_debug_audio_pipeline_setting(self):
+    def test_start_recording_does_not_pass_debug_audio_pipeline_setting(self):
         subject, _indicator = self.make_subject(show_indicator=True)
 
         with patch("gui.QIcon"), patch("gui.AudioRecorder") as AudioRecorder:
             TrayApplication.start_recording(subject, "both")
 
-        self.assertEqual(AudioRecorder.call_args.kwargs["debug_audio_pipeline"], True)
+        self.assertNotIn("debug_audio_pipeline", AudioRecorder.call_args.kwargs)
 
     def test_recording_finished_hides_indicator(self):
         subject, indicator = self.make_subject(show_indicator=True)

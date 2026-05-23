@@ -14,7 +14,6 @@ It is designed to stay out of the way: configure it once, then start or stop rec
 - **Microphone**: record the selected input device.
 - **System Audio**: record loopback audio from the computer.
 - **Both**: record microphone and system audio together, then mix them into one file.
-- **Mic + Echo Reference**: record microphone plus loopback reference, use the loopback only for echo reduction, and output the microphone track without mixing system audio back in.
 
 ### Output Configuration
 
@@ -28,7 +27,7 @@ It is designed to stay out of the way: configure it once, then start or stop rec
 ### Recording Control
 
 - **Tray icon**: left-click starts or stops recording; right-click opens recording actions, the output folder, settings, or exit.
-- **Left-click mode**: choose Last Used, Microphone, Loopback, Both, or Mic + Reference.
+- **Left-click mode**: choose Last Used, Microphone, Loopback, or Both.
 - **Global hotkeys**: configure separate hotkeys for microphone, loopback, both, and stop.
 - **Record hotkeys stop recording**: when enabled, pressing any record hotkey again stops the active recording.
 - **Windows hotkey handling**: supports common combinations such as `alt+shift+r` through a low-level Windows hotkey path.
@@ -44,11 +43,10 @@ It is designed to stay out of the way: configure it once, then start or stop rec
 ### Post-Processing
 
 - **Normalize Audio**: enabled by default. Performs source leveling before mixing: microphone and system audio are each raised toward a target level using active audio only and a maximum gain cap. This keeps quiet microphone speech intelligible without normalizing long silence or residual noise as the reference.
-- **Reduce speaker echo (Both mode)**: enabled by default. Uses system audio as a reference to subtract speaker leakage from the microphone track before denoise, leveling, ducking, and mixing. It only affects Both mode and Mic + Echo Reference mode.
+- **Reduce speaker echo (Both mode)**: enabled by default. Uses system audio as a reference to subtract speaker leakage from the microphone track before denoise, leveling, ducking, and mixing. It only affects Both mode.
 - **Reduce microphone noise (RNNoise)**: optional and off by default. Applies conservative RNNoise speech denoising to the microphone track after echo suppression and before leveling, using a 35% wet mix with latency compensation so weak speech is less likely to be removed. Requires `rnnoise.dll`; if the library is unavailable, recording still succeeds and denoising is skipped.
 - **Lower system audio while microphone is active**: enabled by default. In Both mode, lowers loopback audio while the microphone track is active so local speech stays intelligible. This is side-chain ducking; it does not affect microphone-only or loopback-only recordings.
 - **Silence trim**: optional final post-processing that trims only the start and end silence beyond 5 seconds, applied to the final mixed output rather than the raw sources.
-- **Pipeline diagnostics**: every recording writes a same-name JSON sidecar with post-processing stats. Optional debug audio export saves raw and intermediate WAV files in a same-name `_debug` folder for echo/denoise/leveling/ducking comparison.
 - **Copy File to Clipboard**: copy the completed recording to the clipboard.
 - **Delete after Copy (Move to Temp)**: move the file to the temp folder after copying, keeping the output folder clean.
 
@@ -61,7 +59,7 @@ It is designed to stay out of the way: configure it once, then start or stop rec
 5. In **Output Configuration**, choose the folder, format, quality, and stereo mode.
 6. In **Tray Icon Behavior**, choose what left-click should record.
 7. In **Notifications**, decide whether tray notifications should be shown.
-8. In **Post-Processing & Clipboard**, decide whether to use source leveling/normalization, echo reduction, microphone noise reduction, loopback ducking, debug audio export, final edge-silence trim, clipboard copy, or delete-after-copy.
+8. In **Post-Processing & Clipboard**, decide whether to use source leveling/normalization, echo reduction, microphone noise reduction, loopback ducking, final edge-silence trim, clipboard copy, or delete-after-copy.
 9. In **Global Hotkeys**, set hotkeys and decide whether record hotkeys should stop the active recording.
 10. Click **Save Settings**.
 

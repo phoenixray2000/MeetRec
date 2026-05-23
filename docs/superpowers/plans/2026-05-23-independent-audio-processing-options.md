@@ -474,8 +474,6 @@ In `audio_recorder.py`, add this helper after `_level_source_data()`:
         info = sf.info(source_wav)
         data, sr = sf.read(source_wav, always_2d=True)
         leveled = self._level_source_data(data, sr, source_name)
-        label = f"leveled_{source_name}"
-        self._record_debug_audio(label, data=leveled, samplerate=sr, subtype=info.subtype)
         leveled_wav = tempfile.NamedTemporaryFile(suffix=".wav", delete=False).name
         sf.write(leveled_wav, leveled, sr, format=info.format, subtype=subtype or info.subtype)
         self.temp_files.append(leveled_wav)
@@ -700,7 +698,7 @@ Add this integration test:
             self.assertLess(recorder.ducking_stats["min_gain"], 0.5)
 ```
 
-Add metadata assertions to `test_metadata_sidecar_records_pipeline_state`:
+Add metadata assertions to the recorder metadata test:
 
 ```python
             recorder.ducking = True
@@ -716,18 +714,6 @@ and:
             self.assertTrue(metadata["ducking_applied"])
             self.assertEqual(metadata["ducking_reason"], "applied")
             self.assertEqual(metadata["ducking_stats"], {"reduction_db": 9.0})
-```
-
-Update `test_debug_pipeline_exports_intermediate_tracks` so the expected loopback debug file matches Ducking being enabled:
-
-```python
-            recorder.ducking = True
-```
-
-and replace the loopback artifact assertion:
-
-```python
-            self.assertIn("06_ducked_loopback.wav", exported)
 ```
 
 - [ ] **Step 5: Run tests and verify failure**
@@ -826,7 +812,7 @@ Add helper after `_denoise_mic_data()`:
         return ducked
 ```
 
-In `_prepare_both_source_wav()`, after loopback source leveling and before recording `leveled_loopback`, apply ducking:
+In `_prepare_both_source_wav()`, after loopback source leveling and before mixing, apply ducking:
 
 ```python
         loopback_data = self._level_source_data(loopback_data, loopback_sr, "loopback")
@@ -838,18 +824,7 @@ In `_prepare_both_source_wav()`, after loopback source leveling and before recor
             self.ducking_stats = {"applied": False, "reason": "disabled"}
 ```
 
-Change the debug label to reflect ducking when enabled:
-
-```python
-        self._record_debug_audio(
-            "ducked_loopback" if self.ducking else "leveled_loopback",
-            data=loopback_data,
-            samplerate=loopback_sr,
-            subtype=subtype,
-        )
-```
-
-For `mic_reference` and single-source paths, set Ducking to skipped:
+For single-source paths, set Ducking to skipped:
 
 ```python
             self.ducking_applied = False
@@ -896,17 +871,16 @@ Replace the Post-Processing bullets in `README.md` with:
 
 ```markdown
 - **Normalize Audio**: enabled by default. Performs source leveling before mixing: microphone and system audio are each raised toward a target level using active audio only and a maximum gain cap. This keeps quiet microphone speech intelligible without normalizing long silence or residual noise as the reference.
-- **Reduce speaker echo (Both mode)**: enabled by default. Uses system audio as a reference to subtract speaker leakage from the microphone track before denoise, leveling, ducking, and mixing. It only affects Both mode and Mic + Echo Reference mode.
+- **Reduce speaker echo (Both mode)**: enabled by default. Uses system audio as a reference to subtract speaker leakage from the microphone track before denoise, leveling, ducking, and mixing. It only affects Both mode.
 - **Reduce microphone noise (RNNoise)**: optional and off by default. Applies conservative RNNoise speech denoising to the microphone track after echo suppression and before leveling, using a 35% wet mix with latency compensation so weak speech is less likely to be removed. Requires `rnnoise.dll`; if the library is unavailable, recording still succeeds and denoising is skipped.
 - **Lower system audio while microphone is active**: enabled by default. In Both mode, lowers loopback audio while the microphone track is active so local speech stays intelligible. This is side-chain ducking; it does not affect microphone-only or loopback-only recordings.
 - **Silence trim**: optional final post-processing that trims only the start and end silence beyond 5 seconds, applied to the final mixed output rather than the raw sources.
-- **Pipeline diagnostics**: every recording writes a same-name JSON sidecar with post-processing stats. Optional debug audio export saves raw and intermediate WAV files in a same-name `_debug` folder for echo/denoise/leveling/ducking comparison.
 ```
 
 In the Usage section, replace step 8 with:
 
 ```markdown
-8. In **Post-Processing & Clipboard**, decide whether to use source leveling/normalization, echo reduction, microphone noise reduction, loopback ducking, debug audio export, final edge-silence trim, clipboard copy, or delete-after-copy.
+8. In **Post-Processing & Clipboard**, decide whether to use source leveling/normalization, echo reduction, microphone noise reduction, loopback ducking, final edge-silence trim, clipboard copy, or delete-after-copy.
 ```
 
 - [ ] **Step 2: Run focused tests**
@@ -941,32 +915,12 @@ Expected: `dist\MeetRec\MeetRec.exe` exists. If the build fails because `MeetRec
 
 - [ ] **Step 5: Manual regression recording**
 
-Use the packaged app to record one typical Both-mode sample with default post-processing. Verify the JSON sidecar contains:
-
-```json
-{
-  "echo_suppression_enabled": true,
-  "noise_reduction_enabled": false,
-  "source_leveling_enabled": true,
-  "ducking_enabled": true
-}
-```
-
-Then enable RNNoise and record another sample. Verify the sidecar contains:
-
-```json
-{
-  "noise_reduction_enabled": true,
-  "noise_reduction_applied": true,
-  "noise_reduction_reason": "applied"
-}
-```
+Use the packaged app to record one typical Both-mode sample with default post-processing. Then enable RNNoise and record another sample.
 
 Listen for these acceptance criteria:
 
 - With default RNNoise off, local speech is continuous and loopback lowers under speech.
 - With RNNoise on, speech remains continuous; if artifacts appear, they are weaker than the previous full-wet behavior.
-- Debug folder includes separate intermediate tracks for raw mic, raw loopback, AEC mic, denoised mic when enabled, leveled mic, ducked loopback when Ducking is enabled, and mixed pre-trim.
 
 - [ ] **Step 6: Commit**
 
