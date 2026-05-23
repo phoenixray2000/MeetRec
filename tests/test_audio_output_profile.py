@@ -333,6 +333,60 @@ class OutputProfileTests(unittest.TestCase):
                 places=5,
             )
 
+    def test_single_mic_normalize_uses_source_leveling_stats(self):
+        import os
+        import tempfile
+
+        import numpy as np
+        import soundfile as sf
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            sr = 16000
+            mic_file = os.path.join(temp_dir, "mic.wav")
+            mic = np.zeros((sr * 2, 1), dtype=np.float32)
+            mic[sr // 2:sr] = 0.02
+            sf.write(mic_file, mic, sr, format="WAV", subtype="FLOAT")
+
+            recorder = self._make_recorder("wav", "balanced", stereo=False)
+            recorder.source_mode = "mic"
+            recorder.normalize = True
+            recorder.noise_reduction = False
+            recorder.temp_files = [mic_file]
+
+            prepared = recorder._prepare_source_wav("FLOAT")
+            output, _ = sf.read(prepared, always_2d=True)
+
+            self.assertNotEqual(prepared, mic_file)
+            self.assertIn("mic", recorder.source_leveling_stats)
+            self.assertTrue(recorder.source_leveling_stats["mic"]["applied"])
+            self.assertGreater(float(np.median(np.abs(output[sr // 2:sr, 0]))), 0.10)
+            self.assertLessEqual(float(np.max(np.abs(output))), 0.9801)
+
+    def test_single_loopback_normalize_uses_source_leveling_stats(self):
+        import os
+        import tempfile
+
+        import numpy as np
+        import soundfile as sf
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            sr = 16000
+            loop_file = os.path.join(temp_dir, "loop.wav")
+            loopback = np.zeros((sr * 2, 1), dtype=np.float32)
+            loopback[sr // 2:sr] = 0.015
+            sf.write(loop_file, loopback, sr, format="WAV", subtype="FLOAT")
+
+            recorder = self._make_recorder("wav", "balanced", stereo=False)
+            recorder.source_mode = "loopback"
+            recorder.normalize = True
+            recorder.temp_files = [loop_file]
+
+            prepared = recorder._prepare_source_wav("FLOAT")
+
+            self.assertNotEqual(prepared, loop_file)
+            self.assertIn("loopback", recorder.source_leveling_stats)
+            self.assertTrue(recorder.source_leveling_stats["loopback"]["applied"])
+
     def test_invalid_profile_keys_raise_value_error(self):
         with self.assertRaises(ValueError):
             build_output_profile("ogg", "balanced", stereo=False)

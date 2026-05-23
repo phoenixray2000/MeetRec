@@ -908,6 +908,17 @@ class AudioRecorder(threading.Thread):
         self.source_leveling_stats[source_name] = stats
         return leveled
 
+    def _write_leveled_source_wav(self, source_wav, source_name, subtype):
+        info = sf.info(source_wav)
+        data, sr = sf.read(source_wav, always_2d=True)
+        leveled = self._level_source_data(data, sr, source_name)
+        label = f"leveled_{source_name}"
+        self._record_debug_audio(label, data=leveled, samplerate=sr, subtype=info.subtype)
+        leveled_wav = tempfile.NamedTemporaryFile(suffix=".wav", delete=False).name
+        sf.write(leveled_wav, leveled, sr, format=info.format, subtype=subtype or info.subtype)
+        self.temp_files.append(leveled_wav)
+        return leveled_wav
+
     def _denoise_mic_data(self, data, samplerate):
         cleaned, stats = denoise.reduce_noise(
             data,
@@ -1067,7 +1078,8 @@ class AudioRecorder(threading.Thread):
             self.noise_reduction_reason = "disabled" if not self.noise_reduction else "not_mic_source"
 
         if self.normalize:
-            self._normalize_audio(source_wav)
+            source_name = "loopback" if self.source_mode == "loopback" else "mic"
+            source_wav = self._write_leveled_source_wav(source_wav, source_name, subtype)
         return self._maybe_trim_final_wav(source_wav)
 
     def _mix_audio(self, file1, file2, out_file, subtype, limit_output=False):
