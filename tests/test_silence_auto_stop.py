@@ -194,7 +194,7 @@ class AudioRecorderAutoStopTests(unittest.TestCase):
             "trim_silence_removed_seconds": 0.0,
         }
         self.assertEqual({key: metadata[key] for key in expected_core}, expected_core)
-        self.assertEqual(metadata["echo_suppression_enabled"], False)
+        self.assertEqual(metadata["echo_suppression_enabled"], True)
         self.assertEqual(metadata["echo_suppression_applied"], False)
         self.assertEqual(metadata["echo_suppression_reason"], "not_run")
         self.assertEqual(metadata["echo_suppression_stats"], {})
@@ -202,7 +202,11 @@ class AudioRecorderAutoStopTests(unittest.TestCase):
         self.assertIn("noise_reduction_available", metadata)
         self.assertEqual(metadata["noise_reduction_applied"], False)
         self.assertEqual(metadata["noise_reduction_reason"], "not_run")
-        self.assertEqual(metadata["source_leveling_enabled"], False)
+        self.assertEqual(metadata["ducking_enabled"], True)
+        self.assertEqual(metadata["ducking_applied"], False)
+        self.assertEqual(metadata["ducking_reason"], "not_run")
+        self.assertEqual(metadata["ducking_stats"], {})
+        self.assertEqual(metadata["source_leveling_enabled"], True)
         self.assertEqual(metadata["source_leveling_stats"], {})
 
 

@@ -934,7 +934,7 @@ Expected: all tests PASS.
 Run:
 
 ```powershell
-npm.cmd run dist
+.\.venv\Scripts\pyinstaller.exe --clean --noconfirm MeetRec.spec
 ```
 
 Expected: `dist\MeetRec\MeetRec.exe` exists. If the build fails because `MeetRec.exe` is locked, stop only the running `MeetRec.exe` process and rerun the command.
