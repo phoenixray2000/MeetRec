@@ -3,10 +3,12 @@ import unittest
 import numpy as np
 
 from audio_processing import (
+    DuckingConfig,
     EchoSuppressionConfig,
     SourceLevelingConfig,
     align_reference_to_target,
     apply_limiter,
+    duck_reference_audio,
     estimate_block_delay,
     level_active_source,
     suppress_reference_echo,
@@ -169,6 +171,47 @@ class SourceLevelingTests(unittest.TestCase):
         data = np.array([[-2.0], [-0.5], [0.5], [2.0]], dtype=np.float32)
         limited = apply_limiter(data, limit=0.98)
         self.assertEqual(limited[:, 0].tolist(), [-0.98, -0.5, 0.5, 0.98])
+
+
+class DuckingTests(unittest.TestCase):
+    def test_disabled_ducking_returns_reference_unchanged(self):
+        sr = 16000
+        reference = np.full((sr, 1), 0.2, dtype=np.float32)
+        trigger = np.full((sr, 1), 0.2, dtype=np.float32)
+
+        out, stats = duck_reference_audio(
+            reference,
+            trigger,
+            sr,
+            DuckingConfig(enabled=False),
+        )
+
+        np.testing.assert_allclose(out, reference)
+        self.assertFalse(stats["applied"])
+        self.assertEqual(stats["reason"], "disabled")
+
+    def test_ducking_reduces_reference_while_trigger_is_active(self):
+        sr = 16000
+        reference = np.full((sr * 2, 1), 0.2, dtype=np.float32)
+        trigger = np.zeros((sr * 2, 1), dtype=np.float32)
+        trigger[sr // 2:sr] = 0.12
+
+        out, stats = duck_reference_audio(
+            reference,
+            trigger,
+            sr,
+            DuckingConfig(
+                enabled=True,
+                reduction_db=9.0,
+                threshold=0.02,
+                attack_ms=20.0,
+                release_ms=120.0,
+            ),
+        )
+
+        self.assertTrue(stats["applied"])
+        self.assertLess(float(np.mean(np.abs(out[sr // 2:sr, 0]))), 0.09)
+        self.assertGreater(float(np.mean(np.abs(out[:sr // 4, 0]))), 0.18)
 
 
 if __name__ == "__main__":

@@ -11,8 +11,10 @@ import tempfile
 from collections import deque
 from app_metadata import RECORDING_FILENAME_PREFIX
 from audio_processing import (
+    DuckingConfig,
     EchoSuppressionConfig,
     SourceLevelingConfig,
+    duck_reference_audio,
     level_active_source,
     suppress_reference_echo,
 )
@@ -59,10 +61,16 @@ NORMALIZE_TARGET_LEVEL = 0.12
 NORMALIZE_MAX_GAIN = 8.0
 NORMALIZE_REFERENCE_PERCENTILE = 95
 NORMALIZE_LIMIT = 0.98
-ECHO_SUPPRESSION_DEFAULT_ENABLED = False
+NORMALIZE_DEFAULT_ENABLED = True
+ECHO_SUPPRESSION_DEFAULT_ENABLED = True
 NOISE_REDUCTION_DEFAULT_ENABLED = False
 NOISE_REDUCTION_MIX = 0.35
 NOISE_REDUCTION_LATENCY_MS = 20.0
+DUCKING_DEFAULT_ENABLED = True
+DUCKING_REDUCTION_DB = 9.0
+DUCKING_THRESHOLD = 0.012
+DUCKING_ATTACK_MS = 35.0
+DUCKING_RELEASE_MS = 250.0
 SOURCE_LEVELING_MIN_ACTIVE_SECONDS = 0.5
 DEBUG_AUDIO_PIPELINE_DEFAULT_ENABLED = False
 RAW_RECORDER_CHUNK_FRAMES = 2048
@@ -493,9 +501,10 @@ class AudioRecorder(threading.Thread):
         output_format="flac",
         quality="balanced",
         stereo=False,
-        normalize=False,
+        normalize=NORMALIZE_DEFAULT_ENABLED,
         echo_suppression=ECHO_SUPPRESSION_DEFAULT_ENABLED,
         noise_reduction=NOISE_REDUCTION_DEFAULT_ENABLED,
+        ducking=DUCKING_DEFAULT_ENABLED,
         debug_audio_pipeline=DEBUG_AUDIO_PIPELINE_DEFAULT_ENABLED,
         trim_silence=TRIM_SILENCE_DEFAULT_ENABLED,
         auto_stop_silence_seconds=AUTO_STOP_DEFAULT_SECONDS,
@@ -509,9 +518,10 @@ class AudioRecorder(threading.Thread):
         self.quality = str(quality or "balanced").strip().lower()
         self.stereo = bool(stereo)
         self.profile = build_output_profile(self.output_format, self.quality, self.stereo)
-        self.normalize = normalize
+        self.normalize = _normalize_bool_setting(normalize, NORMALIZE_DEFAULT_ENABLED)
         self.echo_suppression = normalize_echo_suppression_enabled(echo_suppression)
         self.noise_reduction = normalize_noise_reduction_enabled(noise_reduction)
+        self.ducking = _normalize_bool_setting(ducking, DUCKING_DEFAULT_ENABLED)
         self.debug_audio_pipeline = normalize_debug_audio_pipeline_enabled(debug_audio_pipeline)
         self.trim_silence = normalize_trim_silence_enabled(trim_silence)
         self.auto_stop_silence_seconds = normalize_auto_stop_silence_seconds(auto_stop_silence_seconds)
@@ -538,6 +548,9 @@ class AudioRecorder(threading.Thread):
         self.echo_suppression_stats = {}
         self.noise_reduction_applied = False
         self.noise_reduction_reason = "not_run"
+        self.ducking_applied = False
+        self.ducking_reason = "not_run"
+        self.ducking_stats = {}
         self.source_leveling_stats = {}
         self.debug_audio_artifacts = []
         self.debug_audio_dir = None
@@ -607,6 +620,10 @@ class AudioRecorder(threading.Thread):
             "noise_reduction_available": denoise.is_available(),
             "noise_reduction_applied": self.noise_reduction_applied,
             "noise_reduction_reason": self.noise_reduction_reason,
+            "ducking_enabled": self.ducking,
+            "ducking_applied": self.ducking_applied,
+            "ducking_reason": self.ducking_reason,
+            "ducking_stats": self.ducking_stats,
             "source_leveling_enabled": bool(self.normalize),
             "source_leveling_stats": self.source_leveling_stats,
             "debug_audio_pipeline_enabled": self.debug_audio_pipeline,
@@ -933,6 +950,24 @@ class AudioRecorder(threading.Thread):
         self.noise_reduction_reason = str(stats.get("reason", "unknown"))
         return cleaned
 
+    def _duck_loopback_data(self, loopback_data, mic_data, samplerate):
+        ducked, stats = duck_reference_audio(
+            loopback_data,
+            mic_data,
+            samplerate,
+            DuckingConfig(
+                enabled=bool(self.ducking),
+                reduction_db=DUCKING_REDUCTION_DB,
+                threshold=DUCKING_THRESHOLD,
+                attack_ms=DUCKING_ATTACK_MS,
+                release_ms=DUCKING_RELEASE_MS,
+            ),
+        )
+        self.ducking_applied = bool(stats.get("applied"))
+        self.ducking_reason = str(stats.get("reason", "unknown"))
+        self.ducking_stats = stats
+        return ducked
+
     def _mix_audio_data(self, d1, d2, out_file, samplerate, subtype, limit_output=False):
         if d1.shape[1] != d2.shape[1]:
             raise ValueError("Cannot mix audio with different channel counts.")
@@ -992,6 +1027,9 @@ class AudioRecorder(threading.Thread):
 
         output_subtype = subtype or mic_info.subtype or loopback_info.subtype
         if self.source_mode == "mic_reference":
+            self.ducking_applied = False
+            self.ducking_reason = "not_mixed"
+            self.ducking_stats = {"applied": False, "reason": "not_mixed"}
             mic_output_wav = tempfile.NamedTemporaryFile(suffix=".wav", delete=False).name
             sf.write(mic_output_wav, mic_data, mic_sr, format="WAV", subtype=output_subtype)
             self.temp_files.append(mic_output_wav)
@@ -999,8 +1037,16 @@ class AudioRecorder(threading.Thread):
             return mic_output_wav
 
         loopback_data = self._level_source_data(loopback_data, loopback_sr, "loopback")
+        if self.ducking:
+            loopback_data = self._duck_loopback_data(loopback_data, mic_data, loopback_sr)
+            loopback_debug_label = "ducked_loopback"
+        else:
+            self.ducking_applied = False
+            self.ducking_reason = "disabled"
+            self.ducking_stats = {"applied": False, "reason": "disabled"}
+            loopback_debug_label = "leveled_loopback"
         self._record_debug_audio(
-            "leveled_loopback",
+            loopback_debug_label,
             data=loopback_data,
             samplerate=loopback_sr,
             subtype=subtype,
@@ -1061,6 +1107,9 @@ class AudioRecorder(threading.Thread):
         self.echo_suppression_reason = "single_source"
         self.echo_suppression_stats = {}
         self.source_leveling_stats = {}
+        self.ducking_applied = False
+        self.ducking_reason = "single_source"
+        self.ducking_stats = {"applied": False, "reason": "single_source"}
 
         source_wav = self.temp_files[0]
         self._record_debug_audio(f"raw_{self.source_mode}", path=source_wav)

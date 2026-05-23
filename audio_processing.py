@@ -29,6 +29,15 @@ class SourceLevelingConfig:
     samplerate: int = 16000
 
 
+@dataclass(frozen=True)
+class DuckingConfig:
+    enabled: bool = False
+    reduction_db: float = 9.0
+    threshold: float = 0.012
+    attack_ms: float = 35.0
+    release_ms: float = 250.0
+
+
 def as_2d_float_audio(data):
     audio = np.asarray(data, dtype=np.float32)
     if audio.ndim == 1:
@@ -279,4 +288,50 @@ def level_active_source(data, active_mask, config):
         "applied": True, "reason": "applied",
         "gain": round(float(gain), 6), "active_seconds": round(active_seconds, 3),
         "reference_level": round(reference_level, 6),
+    }
+
+
+def duck_reference_audio(reference, trigger, samplerate, config):
+    reference = as_2d_float_audio(reference)
+    trigger = as_2d_float_audio(trigger)
+    if not config.enabled:
+        return reference.copy(), {"applied": False, "reason": "disabled"}
+
+    frames = min(len(reference), len(trigger))
+    if frames == 0:
+        return reference.copy(), {"applied": False, "reason": "empty_audio"}
+
+    out = reference.copy()
+    trigger_mono = np.max(np.abs(trigger[:frames]), axis=1)
+    threshold = float(max(0.0, config.threshold))
+    active = trigger_mono >= threshold
+    if not np.any(active):
+        return reference.copy(), {
+            "applied": False,
+            "reason": "no_trigger_activity",
+            "threshold": round(threshold, 6),
+        }
+
+    reduction_gain = 10.0 ** (-float(config.reduction_db) / 20.0)
+    hop = max(1, int(round(float(samplerate) * 0.01)))
+    attack = np.exp(-hop / max(1.0, float(samplerate) * float(config.attack_ms) / 1000.0))
+    release = np.exp(-hop / max(1.0, float(samplerate) * float(config.release_ms) / 1000.0))
+    envelope = np.ones(frames, dtype=np.float32)
+    current = 1.0
+
+    for start in range(0, frames, hop):
+        end = min(frames, start + hop)
+        desired = reduction_gain if bool(np.any(active[start:end])) else 1.0
+        coef = attack if desired < current else release
+        current = desired + (current - desired) * coef
+        envelope[start:end] = current
+
+    out[:frames] = out[:frames] * envelope[:, None]
+    return out, {
+        "applied": True,
+        "reason": "applied",
+        "reduction_db": round(float(config.reduction_db), 3),
+        "threshold": round(threshold, 6),
+        "active_seconds": round(float(np.count_nonzero(active)) / float(samplerate), 3),
+        "min_gain": round(float(np.min(envelope)), 6),
     }
