@@ -61,7 +61,8 @@ NORMALIZE_REFERENCE_PERCENTILE = 95
 NORMALIZE_LIMIT = 0.98
 ECHO_SUPPRESSION_DEFAULT_ENABLED = False
 NOISE_REDUCTION_DEFAULT_ENABLED = False
-NOISE_REDUCTION_MIX = 1.0
+NOISE_REDUCTION_MIX = 0.35
+NOISE_REDUCTION_LATENCY_MS = 20.0
 SOURCE_LEVELING_MIN_ACTIVE_SECONDS = 0.5
 DEBUG_AUDIO_PIPELINE_DEFAULT_ENABLED = False
 RAW_RECORDER_CHUNK_FRAMES = 2048
@@ -914,6 +915,7 @@ class AudioRecorder(threading.Thread):
             NoiseReductionConfig(
                 enabled=self.noise_reduction,
                 mix=NOISE_REDUCTION_MIX,
+                latency_ms=NOISE_REDUCTION_LATENCY_MS,
             ),
         )
         self.noise_reduction_applied = bool(stats.get("applied"))

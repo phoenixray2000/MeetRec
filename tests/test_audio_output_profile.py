@@ -1,4 +1,5 @@
 import unittest
+from unittest.mock import patch
 
 from audio_recorder import (
     FORMAT_CONFIG,
@@ -337,6 +338,22 @@ class OutputProfileTests(unittest.TestCase):
             build_output_profile("ogg", "balanced", stereo=False)
         with self.assertRaises(ValueError):
             build_output_profile("flac", "studio", stereo=False)
+
+    def test_denoise_uses_conservative_35_percent_mix(self):
+        import numpy as np
+
+        recorder = self._make_recorder("wav", "balanced", stereo=False)
+        recorder.noise_reduction = True
+        data = np.full((16000, 1), 0.1, dtype=np.float32)
+
+        with patch("audio_recorder.denoise.reduce_noise") as reduce_noise:
+            reduce_noise.return_value = (data.copy(), {"applied": True, "reason": "applied"})
+
+            recorder._denoise_mic_data(data, 16000)
+
+        config = reduce_noise.call_args.args[2]
+        self.assertAlmostEqual(config.mix, 0.35)
+        self.assertAlmostEqual(config.latency_ms, 20.0)
 
     def test_both_mode_suppresses_echo_then_levels(self):
         import os

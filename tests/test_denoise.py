@@ -7,12 +7,24 @@ from denoise import NoiseReductionConfig, reduce_noise
 
 
 class _FakeBackend:
-    """Fake RNNoise backend: halves 48 kHz mono frames for wiring tests."""
+    """Fake RNNoise backend for wiring tests."""
     samplerate = 48000
     frame_size = 480
 
+    def __init__(self, gain=0.5, delay_samples=0):
+        self.gain = gain
+        self.delay_samples = delay_samples
+
     def process(self, mono_48k_pm1):
-        return (np.asarray(mono_48k_pm1, dtype=np.float32) * 0.5)
+        wet = np.asarray(mono_48k_pm1, dtype=np.float32) * self.gain
+        if self.delay_samples <= 0:
+            return wet
+        return np.concatenate(
+            [
+                np.zeros(self.delay_samples, dtype=np.float32),
+                wet[:-self.delay_samples],
+            ]
+        )
 
 
 class DenoiseTests(unittest.TestCase):
@@ -48,6 +60,34 @@ class DenoiseTests(unittest.TestCase):
         out, stats = reduce_noise(data, 16000, NoiseReductionConfig(enabled=True, mix=0.0))
         np.testing.assert_allclose(out, data, atol=0.02)
         self.assertTrue(stats["applied"])
+
+    def test_latency_compensation_aligns_wet_signal_before_mix(self):
+        denoise._BACKEND = _FakeBackend(gain=1.0, delay_samples=960)
+        data = np.zeros((48000, 1), dtype=np.float32)
+        data[12000, 0] = 0.8
+
+        out, stats = reduce_noise(
+            data,
+            48000,
+            NoiseReductionConfig(enabled=True, mix=1.0, latency_ms=20.0),
+        )
+
+        self.assertEqual(int(np.argmax(np.abs(out[:, 0]))), 12000)
+        self.assertEqual(stats["latency_ms"], 20.0)
+
+    def test_latency_compensation_preserves_length_when_advancing_wet(self):
+        denoise._BACKEND = _FakeBackend(gain=1.0, delay_samples=960)
+        data = np.full((48000, 1), 0.2, dtype=np.float32)
+
+        out, stats = reduce_noise(
+            data,
+            48000,
+            NoiseReductionConfig(enabled=True, mix=0.35, latency_ms=20.0),
+        )
+
+        self.assertEqual(out.shape, data.shape)
+        self.assertTrue(stats["applied"])
+        self.assertEqual(stats["mix"], 0.35)
 
     def test_passthrough_for_48k_no_resample(self):
         data = np.full((48000, 1), 0.2, dtype=np.float32)

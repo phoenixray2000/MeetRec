@@ -19,6 +19,7 @@ RNNOISE_FRAME = 480
 class NoiseReductionConfig:
     enabled: bool = False
     mix: float = 1.0
+    latency_ms: float = 20.0
 
 
 def _candidate_dll_paths():
@@ -104,6 +105,15 @@ def _resample(x, sr_in, sr_out):
     return resample_poly(x, int(sr_out) // g, int(sr_in) // g).astype(np.float32)
 
 
+def _advance_audio(data, frames):
+    frames = int(max(0, frames))
+    if frames <= 0 or len(data) == 0:
+        return data
+    if frames >= len(data):
+        return np.zeros_like(data)
+    return np.concatenate([data[frames:], np.zeros(frames, dtype=np.float32)])
+
+
 def reduce_noise(data, samplerate, config):
     audio = np.asarray(data, dtype=np.float32)
     if audio.ndim == 1:
@@ -116,6 +126,8 @@ def reduce_noise(data, samplerate, config):
 
     target_sr = _BACKEND.samplerate
     mix = float(np.clip(config.mix, 0.0, 1.0))
+    latency_ms = float(max(0.0, config.latency_ms))
+    latency_frames = int(round(latency_ms * float(samplerate) / 1000.0))
     out = np.empty_like(audio)
     try:
         for ch in range(audio.shape[1]):
@@ -127,6 +139,7 @@ def reduce_noise(data, samplerate, config):
                 wet = np.concatenate([wet, np.zeros(len(mono) - len(wet), dtype=np.float32)])
             else:
                 wet = wet[:len(mono)]
+            wet = _advance_audio(wet.astype(np.float32, copy=False), latency_frames)
             out[:, ch] = (1.0 - mix) * mono + mix * wet
     except Exception as e:
         print(f"Noise reduction failed: {e}")
@@ -134,6 +147,7 @@ def reduce_noise(data, samplerate, config):
 
     return out, {
         "applied": True, "reason": "applied",
-        "mix": round(mix, 3), "channels": int(audio.shape[1]),
+        "mix": round(mix, 3), "latency_ms": round(latency_ms, 3),
+        "channels": int(audio.shape[1]),
         "samplerate": int(samplerate),
     }
