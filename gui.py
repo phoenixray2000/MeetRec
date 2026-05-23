@@ -910,7 +910,7 @@ class SettingsWindow(QMainWindow):
         group_tray = QGroupBox("Tray Icon Behavior")
         layout_tray = QFormLayout()
         self.combo_left_click = QComboBox()
-        self.combo_left_click.addItems(["Last Used", "Microphone", "Loopback", "Both"])
+        self.combo_left_click.addItems(["Last Used", "Microphone", "Loopback", "Both", "Mic + Reference"])
         layout_tray.addRow("Left Click Action:", self.combo_left_click)
         group_tray.setLayout(layout_tray)
         layout.addWidget(group_tray)
@@ -942,6 +942,11 @@ class SettingsWindow(QMainWindow):
             "suppression and before leveling. Requires rnnoise.dll; silently skipped "
             "if unavailable."
         )
+        self.chk_debug_audio_pipeline = QCheckBox("Save debug audio pipeline")
+        self.chk_debug_audio_pipeline.setToolTip(
+            "Writes raw and intermediate WAV files next to each recording so echo "
+            "suppression, denoising, leveling and mixing can be inspected separately."
+        )
         self.chk_trim_silence = QCheckBox("Trim start/end silence over 5s")
         self.chk_trim_silence.setChecked(False)
         self.chk_clipboard = QCheckBox("Copy File to Clipboard")
@@ -953,6 +958,7 @@ class SettingsWindow(QMainWindow):
         layout_post.addWidget(self.chk_normalize)
         layout_post.addWidget(self.chk_echo_suppression)
         layout_post.addWidget(self.chk_noise_reduction)
+        layout_post.addWidget(self.chk_debug_audio_pipeline)
         layout_post.addWidget(self.chk_trim_silence)
         layout_post.addWidget(self.chk_clipboard)
         layout_post.addWidget(self.chk_delete)
@@ -1089,6 +1095,9 @@ class SettingsWindow(QMainWindow):
         self.chk_noise_reduction.setChecked(
             self._parse_bool_setting(data.get("noise_reduction"))
         )
+        self.chk_debug_audio_pipeline.setChecked(
+            self._parse_bool_setting(data.get("debug_audio_pipeline"))
+        )
         self.chk_trim_silence.setChecked(
             self._parse_bool_setting(data.get("trim_silence"))
         )
@@ -1150,6 +1159,7 @@ class SettingsWindow(QMainWindow):
             "normalize": self.chk_normalize.isChecked(),
             "echo_suppression": self.chk_echo_suppression.isChecked(),
             "noise_reduction": self.chk_noise_reduction.isChecked(),
+            "debug_audio_pipeline": self.chk_debug_audio_pipeline.isChecked(),
             "trim_silence": self.chk_trim_silence.isChecked(),
             "clipboard": self.chk_clipboard.isChecked(),
             "delete_after": self.chk_delete.isChecked(),
@@ -1213,6 +1223,8 @@ class TrayApplication(QObject):
         self.action_record_loop.triggered.connect(lambda: self.start_recording("loopback"))
         self.action_record_both = QAction("Start Recording (Both)", self)
         self.action_record_both.triggered.connect(lambda: self.start_recording("both"))
+        self.action_record_mic_reference = QAction("Start Recording (Mic + Echo Reference)", self)
+        self.action_record_mic_reference.triggered.connect(lambda: self.start_recording("mic_reference"))
         self.action_stop = QAction("Stop Recording", self)
         self.action_stop.triggered.connect(self.stop_recording)
         self.action_stop.setEnabled(False)
@@ -1226,6 +1238,7 @@ class TrayApplication(QObject):
         self.menu.addAction(self.action_record_mic)
         self.menu.addAction(self.action_record_loop)
         self.menu.addAction(self.action_record_both)
+        self.menu.addAction(self.action_record_mic_reference)
         self.menu.addAction(self.action_stop)
         self.menu.addSeparator()
         self.menu.addAction(self.action_open_folder)
@@ -1289,6 +1302,7 @@ class TrayApplication(QObject):
                 if click_mode == "Microphone": target_mode = "mic"
                 elif click_mode == "Loopback": target_mode = "loopback"
                 elif click_mode == "Both": target_mode = "both"
+                elif click_mode == "Mic + Reference": target_mode = "mic_reference"
                 self.start_recording(target_mode)
 
     def open_recordings_folder(self):
@@ -1335,6 +1349,7 @@ class TrayApplication(QObject):
             normalize=settings['normalize'],
             echo_suppression=settings.get("echo_suppression", False),
             noise_reduction=settings.get("noise_reduction", False),
+            debug_audio_pipeline=settings.get("debug_audio_pipeline", False),
             trim_silence=settings.get("trim_silence", False),
             auto_stop_silence_seconds=settings.get("auto_stop_silence_seconds"),
             on_finish_callback=finish_callback
@@ -1343,6 +1358,7 @@ class TrayApplication(QObject):
         self.action_record_mic.setEnabled(False)
         self.action_record_loop.setEnabled(False)
         self.action_record_both.setEnabled(False)
+        self.action_record_mic_reference.setEnabled(False)
         self.action_stop.setEnabled(True)
         self.tray_icon.setIcon(QIcon(self.icon_rec_path)) 
         self.tray_icon.setToolTip(f"{APP_NAME} Recording ({mode})")
@@ -1362,6 +1378,7 @@ class TrayApplication(QObject):
         self.action_record_mic.setEnabled(True)
         self.action_record_loop.setEnabled(True)
         self.action_record_both.setEnabled(True)
+        self.action_record_mic_reference.setEnabled(True)
         self.action_stop.setEnabled(False)
         self.tray_icon.setIcon(QIcon(self.icon_idle_path))
         self.tray_icon.setToolTip(TRAY_IDLE_TOOLTIP)

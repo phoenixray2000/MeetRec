@@ -294,6 +294,16 @@ class SettingsWindowRecordingIndicatorTests(unittest.TestCase):
         self.assertIs(window.chk_echo_suppression.parentWidget(), post_group)
         self.assertIs(window.chk_noise_reduction.parentWidget(), post_group)
 
+    def test_debug_audio_pipeline_setting_defaults_off(self):
+        window = self.make_window({})
+
+        self.assertIs(window.get_settings()["debug_audio_pipeline"], False)
+
+    def test_debug_audio_pipeline_setting_can_be_enabled(self):
+        window = self.make_window({"debug_audio_pipeline": True})
+
+        self.assertIs(window.get_settings()["debug_audio_pipeline"], True)
+
     def test_launch_at_startup_setting_defaults_off(self):
         window = self.make_window({})
 
@@ -413,6 +423,16 @@ class TrayApplicationMenuTests(unittest.TestCase):
         TrayApplication.build_menu(subject)
 
         self.assertIs(subject.recording_indicator.context_menu, subject.menu)
+
+    def test_mic_reference_menu_action_starts_reference_mode(self):
+        subject = self.make_subject()
+        started = []
+        subject.start_recording = lambda mode: started.append(mode)
+
+        TrayApplication.build_menu(subject)
+        subject.action_record_mic_reference.trigger()
+
+        self.assertEqual(started, ["mic_reference"])
 
 
 class TrayApplicationHotkeyTests(unittest.TestCase):
@@ -614,6 +634,7 @@ class TrayApplicationRecordingIndicatorTests(unittest.TestCase):
                     "normalize": True,
                     "echo_suppression": True,
                     "noise_reduction": True,
+                    "debug_audio_pipeline": True,
                     "trim_silence": True,
                     "auto_stop_silence_seconds": 600,
                     "show_recording_indicator": show_indicator,
@@ -626,6 +647,7 @@ class TrayApplicationRecordingIndicatorTests(unittest.TestCase):
             action_record_mic=SimpleNamespace(setEnabled=lambda enabled: None),
             action_record_loop=SimpleNamespace(setEnabled=lambda enabled: None),
             action_record_both=SimpleNamespace(setEnabled=lambda enabled: None),
+            action_record_mic_reference=SimpleNamespace(setEnabled=lambda enabled: None),
             action_stop=SimpleNamespace(setEnabled=lambda enabled: None),
             tray_icon=FakeTrayIcon(),
             icon_rec_path="recording.ico",
@@ -684,6 +706,14 @@ class TrayApplicationRecordingIndicatorTests(unittest.TestCase):
 
         self.assertEqual(AudioRecorder.call_args.kwargs["echo_suppression"], True)
         self.assertEqual(AudioRecorder.call_args.kwargs["noise_reduction"], True)
+
+    def test_start_recording_passes_debug_audio_pipeline_setting(self):
+        subject, _indicator = self.make_subject(show_indicator=True)
+
+        with patch("gui.QIcon"), patch("gui.AudioRecorder") as AudioRecorder:
+            TrayApplication.start_recording(subject, "both")
+
+        self.assertEqual(AudioRecorder.call_args.kwargs["debug_audio_pipeline"], True)
 
     def test_recording_finished_hides_indicator(self):
         subject, indicator = self.make_subject(show_indicator=True)

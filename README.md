@@ -14,6 +14,7 @@ It is designed to stay out of the way: configure it once, then start or stop rec
 - **Microphone**: record the selected input device.
 - **System Audio**: record loopback audio from the computer.
 - **Both**: record microphone and system audio together, then mix them into one file.
+- **Mic + Echo Reference**: record microphone plus loopback reference, use the loopback only for echo reduction, and output the microphone track without mixing system audio back in.
 
 ### Output Configuration
 
@@ -27,7 +28,7 @@ It is designed to stay out of the way: configure it once, then start or stop rec
 ### Recording Control
 
 - **Tray icon**: left-click starts or stops recording; right-click opens recording actions, the output folder, settings, or exit.
-- **Left-click mode**: choose Last Used, Microphone, Loopback, or Both.
+- **Left-click mode**: choose Last Used, Microphone, Loopback, Both, or Mic + Reference.
 - **Global hotkeys**: configure separate hotkeys for microphone, loopback, both, and stop.
 - **Record hotkeys stop recording**: when enabled, pressing any record hotkey again stops the active recording.
 - **Windows hotkey handling**: supports common combinations such as `alt+shift+r` through a low-level Windows hotkey path.
@@ -46,6 +47,7 @@ It is designed to stay out of the way: configure it once, then start or stop rec
 - **Reduce microphone noise (RNNoise)**: applies RNNoise speech denoising to the microphone track after echo suppression and before leveling. Requires `rnnoise.dll`; if the library is unavailable, recording still succeeds and denoising is skipped.
 - **Normalize Audio**: in Both mode this performs per-source leveling (microphone and system audio are each raised toward a target level using an energy floor, so quiet microphone speech is not buried by louder system audio); single-source recordings keep whole-track normalization.
 - **Silence trim**: optional final post-processing that trims only the start and end silence beyond 5 seconds, applied to the final mixed output rather than the raw sources.
+- **Pipeline diagnostics**: every recording writes a same-name JSON sidecar with post-processing stats. Optional debug audio export saves raw and intermediate WAV files in a same-name `_debug` folder for echo/denoise/leveling comparison.
 - **Copy File to Clipboard**: copy the completed recording to the clipboard.
 - **Delete after Copy (Move to Temp)**: move the file to the temp folder after copying, keeping the output folder clean.
 
@@ -58,7 +60,7 @@ It is designed to stay out of the way: configure it once, then start or stop rec
 5. In **Output Configuration**, choose the folder, format, quality, and stereo mode.
 6. In **Tray Icon Behavior**, choose what left-click should record.
 7. In **Notifications**, decide whether tray notifications should be shown.
-8. In **Post-Processing & Clipboard**, enable echo reduction, microphone noise reduction, source leveling/normalization, final edge-silence trim, clipboard copy, or delete-after-copy as needed.
+8. In **Post-Processing & Clipboard**, enable echo reduction, microphone noise reduction, source leveling/normalization, debug audio export, final edge-silence trim, clipboard copy, or delete-after-copy as needed.
 9. In **Global Hotkeys**, set hotkeys and decide whether record hotkeys should stop the active recording.
 10. Click **Save Settings**.
 

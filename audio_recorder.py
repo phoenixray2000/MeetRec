@@ -3,6 +3,8 @@ import soundfile as sf
 import threading
 import time
 import os
+import json
+import shutil
 import lameenc
 import numpy as np
 import tempfile
@@ -61,6 +63,7 @@ ECHO_SUPPRESSION_DEFAULT_ENABLED = False
 NOISE_REDUCTION_DEFAULT_ENABLED = False
 NOISE_REDUCTION_MIX = 1.0
 SOURCE_LEVELING_MIN_ACTIVE_SECONDS = 0.5
+DEBUG_AUDIO_PIPELINE_DEFAULT_ENABLED = False
 RAW_RECORDER_CHUNK_FRAMES = 2048
 
 AUTO_STOP_OFF = None
@@ -176,6 +179,10 @@ def normalize_echo_suppression_enabled(value):
 
 def normalize_noise_reduction_enabled(value):
     return _normalize_bool_setting(value, NOISE_REDUCTION_DEFAULT_ENABLED)
+
+
+def normalize_debug_audio_pipeline_enabled(value):
+    return _normalize_bool_setting(value, DEBUG_AUDIO_PIPELINE_DEFAULT_ENABLED)
 
 
 def build_recording_filename(timestamp, extension):
@@ -488,6 +495,7 @@ class AudioRecorder(threading.Thread):
         normalize=False,
         echo_suppression=ECHO_SUPPRESSION_DEFAULT_ENABLED,
         noise_reduction=NOISE_REDUCTION_DEFAULT_ENABLED,
+        debug_audio_pipeline=DEBUG_AUDIO_PIPELINE_DEFAULT_ENABLED,
         trim_silence=TRIM_SILENCE_DEFAULT_ENABLED,
         auto_stop_silence_seconds=AUTO_STOP_DEFAULT_SECONDS,
         on_finish_callback=None,
@@ -503,6 +511,7 @@ class AudioRecorder(threading.Thread):
         self.normalize = normalize
         self.echo_suppression = normalize_echo_suppression_enabled(echo_suppression)
         self.noise_reduction = normalize_noise_reduction_enabled(noise_reduction)
+        self.debug_audio_pipeline = normalize_debug_audio_pipeline_enabled(debug_audio_pipeline)
         self.trim_silence = normalize_trim_silence_enabled(trim_silence)
         self.auto_stop_silence_seconds = normalize_auto_stop_silence_seconds(auto_stop_silence_seconds)
         self.callback = on_finish_callback
@@ -529,10 +538,12 @@ class AudioRecorder(threading.Thread):
         self.noise_reduction_applied = False
         self.noise_reduction_reason = "not_run"
         self.source_leveling_stats = {}
+        self.debug_audio_artifacts = []
+        self.debug_audio_dir = None
         self.finish_metadata = self.build_finish_metadata()
 
     def _active_source_names(self):
-        if self.source_mode == "both":
+        if self.source_mode in ("both", "mic_reference"):
             return ["mic", "loopback"]
         if self.source_mode == "loopback":
             return ["loopback"]
@@ -597,7 +608,84 @@ class AudioRecorder(threading.Thread):
             "noise_reduction_reason": self.noise_reduction_reason,
             "source_leveling_enabled": bool(self.normalize),
             "source_leveling_stats": self.source_leveling_stats,
+            "debug_audio_pipeline_enabled": self.debug_audio_pipeline,
+            "debug_audio_dir": self.debug_audio_dir,
         }
+
+    def _metadata_json_safe(self, value):
+        if isinstance(value, dict):
+            return {str(k): self._metadata_json_safe(v) for k, v in value.items()}
+        if isinstance(value, (list, tuple)):
+            return [self._metadata_json_safe(v) for v in value]
+        if isinstance(value, np.generic):
+            return value.item()
+        return value
+
+    def _sidecar_metadata(self, final_filepath):
+        metadata = self.build_finish_metadata()
+        metadata.update({
+            "final_filepath": final_filepath,
+            "source_mode": self.source_mode,
+            "output_format": self.output_format,
+            "quality": self.quality,
+            "stereo": self.stereo,
+            "normalize": bool(self.normalize),
+            "profile": self.profile,
+            "debug_audio_artifacts": [
+                {"label": item["label"], "path": item.get("exported_path")}
+                for item in self.debug_audio_artifacts
+                if item.get("exported_path")
+            ],
+        })
+        return self._metadata_json_safe(metadata)
+
+    def _write_metadata_sidecar(self, final_filepath):
+        sidecar_path = os.path.splitext(final_filepath)[0] + ".json"
+        metadata = self._sidecar_metadata(final_filepath)
+        with open(sidecar_path, "w", encoding="utf-8") as fh:
+            json.dump(metadata, fh, indent=2, ensure_ascii=False)
+        return sidecar_path
+
+    def _record_debug_audio(self, label, path=None, data=None, samplerate=None, subtype=None):
+        if not self.debug_audio_pipeline:
+            return
+
+        artifact_path = path
+        if data is not None:
+            artifact_path = tempfile.NamedTemporaryFile(suffix=".wav", delete=False).name
+            sf.write(
+                artifact_path,
+                data,
+                samplerate,
+                format="WAV",
+                subtype=subtype or self.profile["subtype"],
+            )
+            self.temp_files.append(artifact_path)
+
+        if artifact_path:
+            self.debug_audio_artifacts.append({
+                "label": label,
+                "path": artifact_path,
+            })
+
+    def _export_debug_audio_artifacts(self, final_filepath):
+        if not self.debug_audio_pipeline or not self.debug_audio_artifacts:
+            self.debug_audio_dir = None
+            return None
+
+        base, _ext = os.path.splitext(final_filepath)
+        debug_dir = f"{base}_debug"
+        os.makedirs(debug_dir, exist_ok=True)
+        for index, item in enumerate(self.debug_audio_artifacts, start=1):
+            src = item.get("path")
+            if not src or not os.path.exists(src):
+                continue
+            filename = f"{index:02d}_{item['label']}.wav"
+            dst = os.path.join(debug_dir, filename)
+            shutil.copy2(src, dst)
+            item["exported_path"] = dst
+        self.debug_audio_dir = debug_dir
+        return debug_dir
 
     def _get_device(self, is_loopback):
         if is_loopback:
@@ -629,7 +717,7 @@ class AudioRecorder(threading.Thread):
             self._setup_auto_stop()
 
             # 1. Setup Recorders
-            if self.source_mode == "both":
+            if self.source_mode in ("both", "mic_reference"):
                 # Need two recorders
                 dev_mic = self._get_device(is_loopback=False)
                 dev_loop = self._get_device(is_loopback=True)
@@ -719,6 +807,9 @@ class AudioRecorder(threading.Thread):
             filename = build_recording_filename(timestamp, self.profile["extension"])
             self.final_filepath = os.path.join(self.output_folder, filename)
             self._write_final_output(source_wav, self.final_filepath)
+            self._export_debug_audio_artifacts(self.final_filepath)
+            self.finish_metadata = self.build_finish_metadata()
+            self._write_metadata_sidecar(self.final_filepath)
 
         except Exception as e:
             self.error_message = str(e)
@@ -863,6 +954,8 @@ class AudioRecorder(threading.Thread):
             raise ValueError("Cannot mix audio with different channel counts.")
 
         self.source_leveling_stats = {}
+        self._record_debug_audio("raw_mic", path=mic_wav)
+        self._record_debug_audio("raw_loopback", path=loopback_wav)
         if self.echo_suppression:
             mic_data, echo_stats = suppress_reference_echo(
                 mic_data,
@@ -878,12 +971,28 @@ class AudioRecorder(threading.Thread):
             self.echo_suppression_reason = "disabled"
             self.echo_suppression_stats = {}
 
+        self._record_debug_audio("aec_mic", data=mic_data, samplerate=mic_sr, subtype=subtype)
         mic_data = self._denoise_mic_data(mic_data, mic_sr)
+        self._record_debug_audio("denoised_mic", data=mic_data, samplerate=mic_sr, subtype=subtype)
         mic_data = self._level_source_data(mic_data, mic_sr, "mic")
-        loopback_data = self._level_source_data(loopback_data, loopback_sr, "loopback")
+        self._record_debug_audio("leveled_mic", data=mic_data, samplerate=mic_sr, subtype=subtype)
 
-        mixed_wav = tempfile.NamedTemporaryFile(suffix=".wav", delete=False).name
         output_subtype = subtype or mic_info.subtype or loopback_info.subtype
+        if self.source_mode == "mic_reference":
+            mic_output_wav = tempfile.NamedTemporaryFile(suffix=".wav", delete=False).name
+            sf.write(mic_output_wav, mic_data, mic_sr, format="WAV", subtype=output_subtype)
+            self.temp_files.append(mic_output_wav)
+            self._record_debug_audio("mic_reference_output", path=mic_output_wav)
+            return mic_output_wav
+
+        loopback_data = self._level_source_data(loopback_data, loopback_sr, "loopback")
+        self._record_debug_audio(
+            "leveled_loopback",
+            data=loopback_data,
+            samplerate=loopback_sr,
+            subtype=subtype,
+        )
+        mixed_wav = tempfile.NamedTemporaryFile(suffix=".wav", delete=False).name
         self._mix_audio_data(
             mic_data,
             loopback_data,
@@ -893,6 +1002,7 @@ class AudioRecorder(threading.Thread):
             limit_output=bool(self.normalize),
         )
         self.temp_files.append(mixed_wav)
+        self._record_debug_audio("mixed_pre_trim", path=mixed_wav)
         return mixed_wav
 
     def _maybe_trim_final_wav(self, source_wav):
@@ -940,10 +1050,12 @@ class AudioRecorder(threading.Thread):
         self.source_leveling_stats = {}
 
         source_wav = self.temp_files[0]
+        self._record_debug_audio(f"raw_{self.source_mode}", path=source_wav)
         if self.source_mode == "mic" and self.noise_reduction:
             data, sr = sf.read(source_wav, always_2d=True)
             info = sf.info(source_wav)
             cleaned = self._denoise_mic_data(data, sr)
+            self._record_debug_audio("denoised_mic", data=cleaned, samplerate=sr, subtype=info.subtype)
             denoised_wav = tempfile.NamedTemporaryFile(suffix=".wav", delete=False).name
             sf.write(denoised_wav, cleaned, sr, format=info.format, subtype=info.subtype)
             self.temp_files.append(denoised_wav)
