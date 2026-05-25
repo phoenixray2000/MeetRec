@@ -3,11 +3,16 @@
 **MeetRec** is a lightweight Windows tray recorder for meetings, calls, microphone audio, system audio, or both at the same time.
 It is designed to stay out of the way: configure it once, then start or stop recordings from the tray icon, a global hotkey, or the floating timer.
 
-Current version: **1.0.0**.
+Current version: **1.0.1**.
 
 ![MeetRec settings](docs/meetrec-settings.png)
 
 ![MeetRec floating recording timer](docs/meetrec-floating-timer.png)
+
+## What's New In 1.0.1
+
+- Added **Cancel This Recording** below **Stop Recording** in the tray and floating timer menu.
+- Cancelling asks for confirmation, stops the active capture, cleans up temporary files, and saves no output file.
 
 ## What's New In 1.0
 
@@ -36,6 +41,7 @@ Current version: **1.0.0**.
 ### Recording Control
 
 - **Tray icon**: left-click starts or stops recording; right-click opens recording actions, the output folder, settings, or exit.
+- **Cancel current recording**: right-click while recording and choose **Cancel This Recording** to discard the current take after confirmation.
 - **Left-click mode**: choose Last Used, Microphone, Loopback, or Both.
 - **Global hotkeys**: configure separate hotkeys for microphone, loopback, both, and stop.
 - **Record hotkeys stop recording**: when enabled, pressing any record hotkey again stops the active recording.

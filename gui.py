@@ -1237,6 +1237,9 @@ class TrayApplication(QObject):
         self.action_stop = QAction("Stop Recording", self)
         self.action_stop.triggered.connect(self.stop_recording)
         self.action_stop.setEnabled(False)
+        self.action_cancel = QAction("Cancel This Recording", self)
+        self.action_cancel.triggered.connect(self.cancel_recording)
+        self.action_cancel.setEnabled(False)
         self.action_settings = QAction("Settings", self)
         self.action_settings.triggered.connect(self.open_settings)
         self.action_open_folder = QAction("Open Recordings Folder", self)
@@ -1248,6 +1251,7 @@ class TrayApplication(QObject):
         self.menu.addAction(self.action_record_loop)
         self.menu.addAction(self.action_record_both)
         self.menu.addAction(self.action_stop)
+        self.menu.addAction(self.action_cancel)
         self.menu.addSeparator()
         self.menu.addAction(self.action_open_folder)
         self.menu.addAction(self.action_settings)
@@ -1366,6 +1370,7 @@ class TrayApplication(QObject):
         self.action_record_loop.setEnabled(False)
         self.action_record_both.setEnabled(False)
         self.action_stop.setEnabled(True)
+        self.action_cancel.setEnabled(True)
         self.tray_icon.setIcon(QIcon(self.icon_rec_path)) 
         self.tray_icon.setToolTip(f"{APP_NAME} Recording ({mode})")
         if settings.get("show_recording_indicator", True):
@@ -1378,13 +1383,38 @@ class TrayApplication(QObject):
         recording_indicator = getattr(self, "recording_indicator", None)
         if recording_indicator and recording_indicator.isVisible():
             recording_indicator.show_finished(RecordingIndicator.FINISHED_HIDE_DELAY_MS)
-        if self.recorder: self.recorder.stop()
+        if self.recorder:
+            self.action_stop.setEnabled(False)
+            self.action_cancel.setEnabled(False)
+            self.recorder.stop()
+
+    def cancel_recording(self):
+        if not self.recorder or not self.recorder.is_alive():
+            return
+
+        response = QMessageBox.question(
+            self.settings_window,
+            "Cancel Recording",
+            "Cancel this recording and discard the captured audio? No file will be saved.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if response != QMessageBox.StandardButton.Yes:
+            return
+
+        self.action_stop.setEnabled(False)
+        self.action_cancel.setEnabled(False)
+        recording_indicator = getattr(self, "recording_indicator", None)
+        if recording_indicator:
+            recording_indicator.hide_recording()
+        self.recorder.cancel()
 
     def on_recording_finished(self, path, error):
         self.action_record_mic.setEnabled(True)
         self.action_record_loop.setEnabled(True)
         self.action_record_both.setEnabled(True)
         self.action_stop.setEnabled(False)
+        self.action_cancel.setEnabled(False)
         self.tray_icon.setIcon(QIcon(self.icon_idle_path))
         self.tray_icon.setToolTip(TRAY_IDLE_TOOLTIP)
         recording_indicator = getattr(self, "recording_indicator", None)
@@ -1394,6 +1424,10 @@ class TrayApplication(QObject):
         
         if error:
             self.show_tray_notification("Error", f"Recording failed: {error}", QSystemTrayIcon.MessageIcon.Critical, 4000)
+            return
+
+        if not path:
+            self.show_tray_notification("Cancelled", "Recording discarded.", QSystemTrayIcon.MessageIcon.Information, 2000)
             return
             
         settings = self.settings_window.get_settings()

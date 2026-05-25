@@ -8,7 +8,7 @@ from unittest.mock import patch
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PyQt6.QtCore import QObject, Qt
-from PyQt6.QtWidgets import QApplication, QGroupBox, QMenu
+from PyQt6.QtWidgets import QApplication, QGroupBox, QMenu, QMessageBox
 
 from app_metadata import SETTINGS_WINDOW_TITLE, TRAY_IDLE_TOOLTIP
 from gui import (
@@ -121,6 +121,14 @@ class FakeTrayIcon:
 
     def showMessage(self, title, message, icon=None, duration=0):
         self.messages.append((title, message, icon, duration))
+
+
+class FakeAction:
+    def __init__(self):
+        self.enabled = None
+
+    def setEnabled(self, enabled):
+        self.enabled = enabled
 
 
 class WindowsHotkeyParserTests(unittest.TestCase):
@@ -416,6 +424,7 @@ class TrayApplicationMenuTests(unittest.TestCase):
         subject.recording_indicator = FakeRecordingIndicator()
         subject.start_recording = lambda mode: None
         subject.stop_recording = lambda: None
+        subject.cancel_recording = lambda: None
         subject.open_settings = lambda: None
         subject.exit_app = lambda: None
         subject.open_recordings_folder = lambda: None
@@ -455,6 +464,22 @@ class TrayApplicationMenuTests(unittest.TestCase):
 
         self.assertNotIn("Start Recording (Mic + Echo Reference)", action_texts)
         self.assertFalse(hasattr(subject, "action_record_mic_reference"))
+
+    def test_build_menu_places_cancel_recording_below_stop_recording(self):
+        subject = self.make_subject()
+
+        TrayApplication.build_menu(subject)
+
+        action_texts = [
+            action.text()
+            for action in subject.menu.actions()
+            if not action.isSeparator()
+        ]
+        self.assertEqual(
+            action_texts[action_texts.index("Stop Recording") + 1],
+            "Cancel This Recording",
+        )
+        self.assertFalse(subject.action_cancel.isEnabled())
 
 
 class TrayApplicationHotkeyTests(unittest.TestCase):
@@ -669,7 +694,8 @@ class TrayApplicationRecordingIndicatorTests(unittest.TestCase):
             action_record_mic=SimpleNamespace(setEnabled=lambda enabled: None),
             action_record_loop=SimpleNamespace(setEnabled=lambda enabled: None),
             action_record_both=SimpleNamespace(setEnabled=lambda enabled: None),
-            action_stop=SimpleNamespace(setEnabled=lambda enabled: None),
+            action_stop=FakeAction(),
+            action_cancel=FakeAction(),
             tray_icon=FakeTrayIcon(),
             icon_rec_path="recording.ico",
             icon_idle_path="idle.ico",
@@ -686,6 +712,7 @@ class TrayApplicationRecordingIndicatorTests(unittest.TestCase):
 
         AudioRecorder.return_value.start.assert_called_once_with()
         self.assertEqual(indicator.show_count, 1)
+        self.assertTrue(subject.action_cancel.enabled)
 
     def test_start_recording_skips_indicator_when_disabled(self):
         subject, indicator = self.make_subject(show_indicator=False)
@@ -773,6 +800,53 @@ class TrayApplicationRecordingIndicatorTests(unittest.TestCase):
         self.assertEqual(indicator.finished_count, 1)
         self.assertEqual(indicator.finished_hide_delay_ms, 5000)
         self.assertEqual(indicator.hide_count, 0)
+
+    def test_cancel_recording_does_not_discard_without_confirmation(self):
+        subject, indicator = self.make_subject(show_indicator=True)
+        subject.recorder = SimpleNamespace(
+            is_alive=lambda: True,
+            cancel=lambda: setattr(subject, "cancelled", True),
+        )
+        subject.cancelled = False
+
+        with patch(
+            "gui.QMessageBox.question",
+            return_value=QMessageBox.StandardButton.No,
+        ):
+            TrayApplication.cancel_recording(subject)
+
+        self.assertFalse(subject.cancelled)
+        self.assertEqual(indicator.hide_count, 0)
+
+    def test_cancel_recording_discards_after_confirmation(self):
+        subject, indicator = self.make_subject(show_indicator=True)
+        subject.recorder = SimpleNamespace(
+            is_alive=lambda: True,
+            cancel=lambda: setattr(subject, "cancelled", True),
+        )
+        subject.cancelled = False
+
+        with patch(
+            "gui.QMessageBox.question",
+            return_value=QMessageBox.StandardButton.Yes,
+        ):
+            TrayApplication.cancel_recording(subject)
+
+        self.assertTrue(subject.cancelled)
+        self.assertEqual(indicator.hide_count, 1)
+        self.assertFalse(subject.action_stop.enabled)
+        self.assertFalse(subject.action_cancel.enabled)
+
+    def test_recording_finished_reports_cancelled_empty_path(self):
+        subject, indicator = self.make_subject(show_indicator=True)
+        messages = []
+        subject.show_tray_notification = lambda *args, **kwargs: messages.append(args)
+
+        with patch("gui.QIcon"):
+            TrayApplication.on_recording_finished(subject, "", "")
+
+        self.assertEqual(messages[0][0], "Cancelled")
+        self.assertFalse(subject.action_cancel.enabled)
 
 
 if __name__ == "__main__":

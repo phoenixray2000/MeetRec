@@ -522,6 +522,7 @@ class AudioRecorder(threading.Thread):
         self.stop_event = threading.Event()
         self.error_message = None
         self.final_filepath = None
+        self.cancel_requested = False
         
         # Temp files
         self.temp_files = []
@@ -726,6 +727,10 @@ class AudioRecorder(threading.Thread):
                 if r.error:
                     raise Exception(f"Recorder error: {r.error}")
 
+            if self.cancel_requested:
+                self.final_filepath = None
+                return
+
             # 4. Mix/Process
             source_wav = self._prepare_source_wav(subtype)
             
@@ -757,6 +762,10 @@ class AudioRecorder(threading.Thread):
                 self.callback(self.final_filepath, self.error_message)
 
     def stop(self):
+        self.stop_event.set()
+
+    def cancel(self):
+        self.cancel_requested = True
         self.stop_event.set()
 
     def _maybe_trim_temp_sources(self):

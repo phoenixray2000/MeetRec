@@ -528,5 +528,52 @@ class OutputProfileTests(unittest.TestCase):
         )
 
 
+class AudioRecorderCancelTests(unittest.TestCase):
+    def test_cancel_skips_final_output_and_reports_empty_success(self):
+        import os
+        import tempfile
+
+        from audio_recorder import AudioRecorder
+
+        callbacks = []
+
+        class FakeRawRecorder:
+            def __init__(self, *args, **kwargs):
+                self.error = None
+                self.started = False
+                self.stopped = False
+
+            def start(self):
+                self.started = True
+
+            def stop(self):
+                self.stopped = True
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            recorder = AudioRecorder(
+                mic_id="mic1",
+                source_mode="mic",
+                output_folder=temp_dir,
+                output_format="flac",
+                quality="balanced",
+                stereo=False,
+                on_finish_callback=lambda path, error: callbacks.append((path, error)),
+            )
+            recorder.cancel()
+
+            with (
+                patch("audio_recorder.RawRecorder", FakeRawRecorder),
+                patch.object(AudioRecorder, "_get_device", return_value=object()),
+                patch.object(AudioRecorder, "_prepare_source_wav") as prepare_source,
+                patch.object(AudioRecorder, "_write_final_output") as write_final,
+            ):
+                recorder.run()
+
+            self.assertFalse(prepare_source.called)
+            self.assertFalse(write_final.called)
+            self.assertEqual(callbacks, [(None, None)])
+            self.assertEqual(os.listdir(temp_dir), [])
+
+
 if __name__ == "__main__":
     unittest.main()
