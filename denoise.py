@@ -116,6 +116,36 @@ class _RNNoiseBackend:
             self._lib.rnnoise_destroy(state)
         return out
 
+    def process_parallel(self, mono_48k_pm1, num_threads=None, warmup_frames=None):
+        """Denoise a full mono 48k [-1,1] stream using segment-parallel threads.
+        Falls back to per-frame `process` if the dll lacks process_buffer, and to
+        single-segment buffering if the parallel path raises."""
+        if not getattr(self, "_has_buffer", False):
+            return self.process(mono_48k_pm1)
+        if num_threads is None:
+            num_threads = NOISE_REDUCTION_THREADS
+        if warmup_frames is None:
+            warmup_frames = NOISE_REDUCTION_WARMUP_FRAMES
+
+        x = np.asarray(mono_48k_pm1, dtype=np.float32)
+        pad = (-len(x)) % RNNOISE_FRAME
+        if pad:
+            x = np.concatenate([x, np.zeros(pad, dtype=np.float32)])
+        scaled = np.ascontiguousarray((x * 32768.0).astype(np.float32))
+
+        try:
+            out = _parallel_denoise(
+                scaled, num_threads, warmup_frames, self._process_buffer_segment
+            )
+        except Exception as exc:
+            print(f"Parallel denoise failed, using single segment: {exc}")
+            out = self._process_buffer_segment(scaled)
+
+        out = out / 32768.0
+        if pad:
+            out = out[:len(out) - pad]
+        return out.astype(np.float32)
+
 
 def _load_backend():
     for path in _candidate_dll_paths():

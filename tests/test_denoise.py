@@ -151,5 +151,37 @@ class ParallelDenoiseOrchestrationTests(unittest.TestCase):
         self.assertGreaterEqual(max(lengths), seg + warm)
 
 
+class ProcessParallelTests(unittest.TestCase):
+    def _make_backend(self):
+        backend = denoise._RNNoiseBackend.__new__(denoise._RNNoiseBackend)
+        backend._lib = None
+        backend._has_buffer = True
+        backend._process_buffer_segment = lambda scaled: scaled  # identity
+        return backend
+
+    def test_parallel_identity_roundtrips_signal(self):
+        backend = self._make_backend()
+        x = np.linspace(-0.5, 0.5, 8000 * denoise.RNNOISE_FRAME, dtype=np.float32)
+        out = backend.process_parallel(x, num_threads=4, warmup_frames=100)
+        self.assertEqual(len(out), len(x))
+        np.testing.assert_allclose(out, x, atol=1e-3)
+
+    def test_parallel_falls_back_to_single_segment(self):
+        from unittest.mock import patch
+        backend = self._make_backend()  # identity segment -> fallback succeeds
+        x = np.linspace(-0.5, 0.5, 8000 * denoise.RNNOISE_FRAME, dtype=np.float32)
+        with patch.object(denoise, "_parallel_denoise", side_effect=RuntimeError("boom")):
+            out = backend.process_parallel(x, num_threads=4, warmup_frames=100)
+        # parallel path raised -> single-segment fallback (identity) returned input
+        np.testing.assert_allclose(out, x, atol=1e-3)
+
+    def test_parallel_without_buffer_uses_per_frame(self):
+        backend = self._make_backend()
+        backend._has_buffer = False
+        backend.process = lambda mono: np.asarray(mono, dtype=np.float32) * 0.0
+        out = backend.process_parallel(np.ones(960, dtype=np.float32))
+        np.testing.assert_allclose(out, np.zeros(960, dtype=np.float32))
+
+
 if __name__ == "__main__":
     unittest.main()
