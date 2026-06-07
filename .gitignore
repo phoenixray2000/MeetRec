@@ -19,6 +19,7 @@ dist/
 !MeetRec.spec
 *.exe
 rnnoise.dll
+rnnoise.dll.scalar.bak
 rnnoise.exp
 rnnoise.lib
 .deps/
