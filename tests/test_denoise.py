@@ -183,5 +183,33 @@ class ProcessParallelTests(unittest.TestCase):
         np.testing.assert_allclose(out, np.zeros(960, dtype=np.float32))
 
 
+class ReduceNoiseParallelRoutingTests(unittest.TestCase):
+    def setUp(self):
+        self._orig = denoise._BACKEND
+        self.addCleanup(lambda: setattr(denoise, "_BACKEND", self._orig))
+
+    def test_reduce_noise_uses_process_parallel_when_present(self):
+        calls = {"parallel": 0, "frame": 0}
+
+        class FakeParallel:
+            samplerate = 48000
+            frame_size = 480
+
+            def process(self, mono):
+                calls["frame"] += 1
+                return np.asarray(mono, dtype=np.float32)
+
+            def process_parallel(self, mono, num_threads=None, warmup_frames=None):
+                calls["parallel"] += 1
+                return np.asarray(mono, dtype=np.float32)
+
+        denoise._BACKEND = FakeParallel()
+        data = np.full((48000, 1), 0.2, dtype=np.float32)
+        out, stats = reduce_noise(data, 48000, NoiseReductionConfig(enabled=True, mix=1.0))
+        self.assertTrue(stats["applied"])
+        self.assertEqual(calls["parallel"], 1)
+        self.assertEqual(calls["frame"], 0)
+
+
 if __name__ == "__main__":
     unittest.main()

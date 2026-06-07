@@ -218,6 +218,13 @@ def _parallel_denoise(scaled, num_threads, warmup_frames, segment_fn,
     return np.concatenate(results)
 
 
+def _denoise_mono(backend, up):
+    """Use the backend's parallel path when it offers one, else per-frame."""
+    if hasattr(backend, "process_parallel"):
+        return backend.process_parallel(up)
+    return backend.process(up)
+
+
 def reduce_noise(data, samplerate, config):
     audio = np.asarray(data, dtype=np.float32)
     if audio.ndim == 1:
@@ -237,7 +244,7 @@ def reduce_noise(data, samplerate, config):
         for ch in range(audio.shape[1]):
             mono = audio[:, ch]
             up = _resample(mono, samplerate, target_sr)
-            wet_up = _BACKEND.process(up)
+            wet_up = _denoise_mono(_BACKEND, up)
             wet = _resample(wet_up, target_sr, samplerate)
             if len(wet) < len(mono):
                 wet = np.concatenate([wet, np.zeros(len(mono) - len(wet), dtype=np.float32)])
