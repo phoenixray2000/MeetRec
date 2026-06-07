@@ -17,6 +17,13 @@ except Exception:
 RNNOISE_SAMPLERATE = 48000
 RNNOISE_FRAME = 480
 
+# Parallel denoise tuning. Threads default to physical-core estimate; warmup is a
+# 1 s overlap prefix per segment so RNNoise's stateful RNN converges before the
+# kept region; audio shorter than the min isn't worth splitting.
+NOISE_REDUCTION_THREADS = max(1, (os.cpu_count() or 2) // 2)
+NOISE_REDUCTION_WARMUP_FRAMES = 100          # 100 * 480 / 48000 = 1.0 s
+NOISE_REDUCTION_MIN_PARALLEL_FRAMES = 6000   # ~60 s @48k; below this, single-thread
+
 
 @dataclass(frozen=True)
 class NoiseReductionConfig:
@@ -144,6 +151,41 @@ def _advance_audio(data, frames):
     if frames >= len(data):
         return np.zeros_like(data)
     return np.concatenate([data[frames:], np.zeros(frames, dtype=np.float32)])
+
+
+def _parallel_denoise(scaled, num_threads, warmup_frames, segment_fn,
+                      min_parallel_frames=NOISE_REDUCTION_MIN_PARALLEL_FRAMES):
+    """Split a scaled, RNNOISE_FRAME-aligned buffer into contiguous segments,
+    denoise each in a thread via segment_fn, and concatenate. Each non-first
+    segment is processed with a warmup_frames overlap prefix that is discarded
+    from the output (lets RNNoise state converge across the cut). Frame-aligned
+    throughout. segment_fn(chunk)->same-length chunk."""
+    total_frames = len(scaled) // RNNOISE_FRAME
+    k = max(1, min(int(num_threads), total_frames))
+    if k <= 1 or total_frames < min_parallel_frames:
+        return segment_fn(scaled)
+
+    seg_frames = total_frames // k
+    bounds = [
+        (i * seg_frames, total_frames if i == k - 1 else (i + 1) * seg_frames)
+        for i in range(k)
+    ]
+    results = [None] * k
+
+    def work(idx):
+        start_f, end_f = bounds[idx]
+        warm_start = max(0, start_f - int(warmup_frames))
+        chunk = np.ascontiguousarray(
+            scaled[warm_start * RNNOISE_FRAME:end_f * RNNOISE_FRAME]
+        )
+        processed = segment_fn(chunk)
+        keep_from = (start_f - warm_start) * RNNOISE_FRAME
+        keep_to = (end_f - warm_start) * RNNOISE_FRAME
+        results[idx] = processed[keep_from:keep_to]
+
+    with ThreadPoolExecutor(max_workers=k) as executor:
+        list(executor.map(work, range(k)))
+    return np.concatenate(results)
 
 
 def reduce_noise(data, samplerate, config):

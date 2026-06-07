@@ -113,5 +113,43 @@ class RealBackendBufferTests(unittest.TestCase):
         np.testing.assert_allclose(seg, per_frame, atol=1e-6)
 
 
+class ParallelDenoiseOrchestrationTests(unittest.TestCase):
+    def _scaled(self, n_frames):
+        rng = np.random.default_rng(1)
+        return np.ascontiguousarray(
+            rng.standard_normal(n_frames * denoise.RNNOISE_FRAME).astype(np.float32)
+        )
+
+    def test_identity_segment_reconstructs_input(self):
+        scaled = self._scaled(8000)  # > MIN_PARALLEL_FRAMES so it splits
+        out = denoise._parallel_denoise(
+            scaled, num_threads=4, warmup_frames=100, segment_fn=lambda c: c
+        )
+        np.testing.assert_array_equal(out, scaled)
+
+    def test_short_audio_stays_single_segment(self):
+        scaled = self._scaled(100)  # < MIN_PARALLEL_FRAMES
+        seen = []
+        denoise._parallel_denoise(
+            scaled, num_threads=4, warmup_frames=100,
+            segment_fn=lambda c: seen.append(len(c)) or c,
+        )
+        self.assertEqual(len(seen), 1)
+        self.assertEqual(seen[0], len(scaled))
+
+    def test_non_first_segments_get_warmup_prefix(self):
+        scaled = self._scaled(8000)
+        lengths = []
+        denoise._parallel_denoise(
+            scaled, num_threads=4, warmup_frames=100,
+            segment_fn=lambda c: lengths.append(len(c)) or c,
+        )
+        seg = (8000 // 4) * denoise.RNNOISE_FRAME
+        warm = 100 * denoise.RNNOISE_FRAME
+        # first segment has no warmup, later ones carry a warmup prefix
+        self.assertEqual(min(lengths), seg)
+        self.assertGreaterEqual(max(lengths), seg + warm)
+
+
 if __name__ == "__main__":
     unittest.main()
