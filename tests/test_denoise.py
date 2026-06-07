@@ -97,5 +97,21 @@ class DenoiseTests(unittest.TestCase):
         self.assertEqual(stats["samplerate"], 48000)
 
 
+class RealBackendBufferTests(unittest.TestCase):
+    def setUp(self):
+        if not denoise.is_available() or not getattr(denoise._BACKEND, "_has_buffer", False):
+            self.skipTest("real rnnoise backend with process_buffer not available")
+
+    def test_buffer_segment_matches_per_frame(self):
+        backend = denoise._BACKEND
+        rng = np.random.default_rng(0)
+        x = (0.2 * np.sin(2 * np.pi * 220 * np.arange(48000) / 48000)
+             + 0.05 * rng.standard_normal(48000)).astype(np.float32)
+        per_frame = backend.process(x)
+        scaled = np.ascontiguousarray((x * 32768.0).astype(np.float32))
+        seg = backend._process_buffer_segment(scaled) / 32768.0
+        np.testing.assert_allclose(seg, per_frame, atol=1e-6)
+
+
 if __name__ == "__main__":
     unittest.main()

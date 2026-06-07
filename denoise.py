@@ -1,9 +1,12 @@
 import ctypes
 import os
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 
 import numpy as np
+
+_C_FLOAT_P = ctypes.POINTER(ctypes.c_float)
 
 try:
     from scipy.signal import resample_poly
@@ -54,6 +57,17 @@ class _RNNoiseBackend:
             ctypes.POINTER(ctypes.c_float),
             ctypes.POINTER(ctypes.c_float),
         ]
+        try:
+            lib.rnnoise_process_buffer.restype = None
+            lib.rnnoise_process_buffer.argtypes = [
+                ctypes.c_void_p,
+                ctypes.c_int,
+                _C_FLOAT_P,
+                _C_FLOAT_P,
+            ]
+            self._has_buffer = True
+        except AttributeError:
+            self._has_buffer = False
 
     def process(self, mono_48k_pm1):
         x = np.asarray(mono_48k_pm1, dtype=np.float32)
@@ -76,6 +90,24 @@ class _RNNoiseBackend:
         if pad:
             out = out[:len(out) - pad]
         return out.astype(np.float32)
+
+    def _process_buffer_segment(self, scaled):
+        """Denoise one contiguous, already-scaled (*32768), RNNOISE_FRAME-aligned
+        float32 buffer with a single GIL-releasing C call. Returns scaled output."""
+        scaled = np.ascontiguousarray(scaled, dtype=np.float32)
+        out = np.empty_like(scaled)
+        state = self._lib.rnnoise_create(None)
+        try:
+            nframes = len(scaled) // RNNOISE_FRAME
+            self._lib.rnnoise_process_buffer(
+                state,
+                nframes,
+                out.ctypes.data_as(_C_FLOAT_P),
+                scaled.ctypes.data_as(_C_FLOAT_P),
+            )
+        finally:
+            self._lib.rnnoise_destroy(state)
+        return out
 
 
 def _load_backend():
