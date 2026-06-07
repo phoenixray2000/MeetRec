@@ -112,6 +112,31 @@ class RealBackendBufferTests(unittest.TestCase):
         seg = backend._process_buffer_segment(scaled) / 32768.0
         np.testing.assert_allclose(seg, per_frame, atol=1e-6)
 
+    def test_parallel_segments_match_whole_buffer(self):
+        # The whole correctness premise is "segmented output ~= whole-buffer".
+        # Identity-segment orchestration tests can't catch a warmup-convergence
+        # regression (identity has no state), so verify the real RNNoise stitch
+        # against a single whole-buffer pass. 800 frames / 4 = 200-frame segments
+        # > 100-frame warmup, mirroring the production seg>>warmup regime, with a
+        # low min_parallel_frames to force the split on this short (8 s) clip.
+        backend = denoise._BACKEND
+        rng = np.random.default_rng(2)
+        n = 48000 * 8  # frame-aligned: 48000 = 100 frames
+        x = (0.2 * np.sin(2 * np.pi * 220 * np.arange(n) / 48000)
+             + 0.05 * rng.standard_normal(n)).astype(np.float32)
+        scaled = np.ascontiguousarray((x * 32768.0).astype(np.float32))
+        whole = backend._process_buffer_segment(scaled) / 32768.0
+        parallel = denoise._parallel_denoise(
+            scaled, num_threads=4, warmup_frames=100,
+            segment_fn=backend._process_buffer_segment,
+            min_parallel_frames=10,
+        ) / 32768.0
+        self.assertEqual(len(parallel), len(whole))
+        corr = np.corrcoef(whole, parallel)[0, 1]
+        self.assertGreater(corr, 0.999)
+        peak = float(np.max(np.abs(whole)))
+        self.assertLess(float(np.max(np.abs(whole - parallel))), 0.03 * peak)
+
 
 class ParallelDenoiseOrchestrationTests(unittest.TestCase):
     def _scaled(self, n_frames):
@@ -149,6 +174,19 @@ class ParallelDenoiseOrchestrationTests(unittest.TestCase):
         # first segment has no warmup, later ones carry a warmup prefix
         self.assertEqual(min(lengths), seg)
         self.assertGreaterEqual(max(lengths), seg + warm)
+
+    def test_segment_fn_exception_propagates(self):
+        # A worker raising must surface out of _parallel_denoise so that
+        # process_parallel's except-fallback is live, not dead code.
+        scaled = self._scaled(8000)
+
+        def boom(_chunk):
+            raise RuntimeError("boom")
+
+        with self.assertRaises(RuntimeError):
+            denoise._parallel_denoise(
+                scaled, num_threads=4, warmup_frames=100, segment_fn=boom
+            )
 
 
 class ProcessParallelTests(unittest.TestCase):

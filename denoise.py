@@ -64,6 +64,7 @@ class _RNNoiseBackend:
             ctypes.POINTER(ctypes.c_float),
             ctypes.POINTER(ctypes.c_float),
         ]
+        self._has_buffer = False
         try:
             lib.rnnoise_process_buffer.restype = None
             lib.rnnoise_process_buffer.argtypes = [
@@ -73,7 +74,7 @@ class _RNNoiseBackend:
                 _C_FLOAT_P,
             ]
             self._has_buffer = True
-        except AttributeError:
+        except (AttributeError, OSError):
             self._has_buffer = False
 
     def process(self, mono_48k_pm1):

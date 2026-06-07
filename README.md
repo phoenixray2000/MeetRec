@@ -3,11 +3,16 @@
 **MeetRec** is a lightweight Windows tray recorder for meetings, calls, microphone audio, system audio, or both at the same time.
 It is designed to stay out of the way: configure it once, then start or stop recordings from the tray icon, a global hotkey, or the floating timer.
 
-Current version: **1.0.1**.
+Current version: **1.0.2**.
 
 ![MeetRec settings](docs/meetrec-settings.png)
 
 ![MeetRec floating recording timer](docs/meetrec-floating-timer.png)
+
+## What's New In 1.0.2
+
+- Microphone denoising is now **multithreaded and AVX2-accelerated**, cutting post-recording processing of a 2-hour recording from minutes to seconds.
+- Denoising splits the audio into per-core segments processed in parallel, with a short warmup overlap so output matches single-threaded processing. It falls back automatically if the optimized path is unavailable.
 
 ## What's New In 1.0.1
 
