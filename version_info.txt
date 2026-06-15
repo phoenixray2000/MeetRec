@@ -5,8 +5,8 @@
 
 VSVersionInfo(
   ffi=FixedFileInfo(
-    filevers=(1, 0, 2, 0),
-    prodvers=(1, 0, 2, 0),
+    filevers=(1, 0, 3, 0),
+    prodvers=(1, 0, 3, 0),
     mask=0x3f,
     flags=0x0,
     OS=0x40004,
@@ -21,11 +21,11 @@ VSVersionInfo(
         [
           StringStruct('CompanyName', 'MeetRec'),
           StringStruct('FileDescription', 'MeetRec Windows tray recorder'),
-          StringStruct('FileVersion', '1.0.2.0'),
+          StringStruct('FileVersion', '1.0.3.0'),
           StringStruct('InternalName', 'MeetRec'),
           StringStruct('OriginalFilename', 'MeetRec.exe'),
           StringStruct('ProductName', 'MeetRec'),
-          StringStruct('ProductVersion', '1.0.2')
+          StringStruct('ProductVersion', '1.0.3')
         ]
       )
     ]),

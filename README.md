@@ -3,11 +3,16 @@
 **MeetRec** is a lightweight Windows tray recorder for meetings, calls, microphone audio, system audio, or both at the same time.
 It is designed to stay out of the way: configure it once, then start or stop recordings from the tray icon, a global hotkey, or the floating timer.
 
-Current version: **1.0.2**.
+Current version: **1.0.3**.
 
 ![MeetRec settings](docs/meetrec-settings.png)
 
 ![MeetRec floating recording timer](docs/meetrec-floating-timer.png)
+
+## What's New In 1.0.3
+
+- Settings are now stored under `%APPDATA%\MeetRec\settings.json`, so manual launches and Windows auto-start use the same per-user configuration file.
+- Saving settings creates the config directory when needed, avoiding failures on a fresh profile or first packaged launch.
 
 ## What's New In 1.0.2
 

@@ -18,6 +18,7 @@ from gui import (
     TrayApplication,
     WindowsLowLevelHotkeyManager,
     parse_windows_hotkey,
+    resolve_config_path,
 )
 
 
@@ -847,6 +848,34 @@ class TrayApplicationRecordingIndicatorTests(unittest.TestCase):
 
         self.assertEqual(messages[0][0], "Cancelled")
         self.assertFalse(subject.action_cancel.enabled)
+
+
+class ResolveConfigPathTests(unittest.TestCase):
+    def test_anchors_to_appdata_meetrec(self):
+        appdata = os.path.join("C:\\", "Users", "Ray", "AppData", "Roaming")
+        path = resolve_config_path(appdata=appdata)
+        self.assertEqual(
+            path, os.path.join(appdata, "MeetRec", "settings.json")
+        )
+
+    def test_path_is_independent_of_current_working_directory(self):
+        # Simulates auto-start where cwd is C:\Windows\System32, far from the exe.
+        appdata = os.path.join("C:\\", "Users", "Ray", "AppData", "Roaming")
+        original = os.getcwd()
+        try:
+            os.chdir(tempfile.gettempdir())
+            path = resolve_config_path(appdata=appdata)
+        finally:
+            os.chdir(original)
+        self.assertEqual(
+            path, os.path.join(appdata, "MeetRec", "settings.json")
+        )
+        self.assertNotIn(tempfile.gettempdir(), path)
+
+    def test_falls_back_to_home_when_appdata_missing(self):
+        with patch.dict(os.environ, {}, clear=True):
+            path = resolve_config_path()
+        self.assertTrue(path.endswith(os.path.join("MeetRec", "settings.json")))
 
 
 if __name__ == "__main__":

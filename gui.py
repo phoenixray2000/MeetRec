@@ -36,7 +36,7 @@ from audio_recorder import (
 )
 from clipboard_utils import copy_file_to_clipboard
 
-CONFIG_FILE = "settings.json"
+CONFIG_FILENAME = "settings.json"
 NORMALIZE_DEFAULT_ENABLED = True
 ECHO_SUPPRESSION_UI_DEFAULT_ENABLED = True
 NOISE_REDUCTION_UI_DEFAULT_ENABLED = False
@@ -48,6 +48,24 @@ def resource_path(relative_path):
     except Exception:
         base_path = os.path.abspath(".")
     return os.path.join(base_path, relative_path)
+
+
+def resolve_config_dir(appdata=None):
+    """Per-user config directory: %APPDATA%\\MeetRec.
+
+    Anchored to APPDATA so the location is identical no matter how the app is
+    launched (manual double-click, Windows Run-key auto-start, etc.) and always
+    writable without elevation, unlike a path under Program Files.
+    """
+    base = appdata or os.environ.get("APPDATA") or os.path.expanduser("~")
+    return os.path.join(base, APP_NAME)
+
+
+def resolve_config_path(filename=CONFIG_FILENAME, appdata=None):
+    return os.path.join(resolve_config_dir(appdata), filename)
+
+
+CONFIG_FILE = resolve_config_path()
 
 
 STARTUP_REGISTRY_PATH = r"Software\Microsoft\Windows\CurrentVersion\Run"
@@ -1140,6 +1158,7 @@ class SettingsWindow(QMainWindow):
         data = self.get_settings()
         try:
             startup_updated = set_launch_at_startup_enabled(data.get("launch_at_startup", False))
+            os.makedirs(os.path.dirname(CONFIG_FILE), exist_ok=True)
             with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
                 json.dump(data, f, indent=2)
             if not startup_updated:
@@ -1393,7 +1412,7 @@ class TrayApplication(QObject):
             return
 
         response = QMessageBox.question(
-            self.settings_window,
+            None,
             "Cancel Recording",
             "Cancel this recording and discard the captured audio? No file will be saved.",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
