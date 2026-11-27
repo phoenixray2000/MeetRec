@@ -3,11 +3,17 @@
 **MeetRec** is a lightweight Windows tray recorder for meetings, calls, microphone audio, system audio, or both at the same time.
 It is designed to stay out of the way: configure it once, then start or stop recordings from the tray icon, a global hotkey, or the floating timer.
 
-Current version: **1.0.3**.
+Current version: **1.0.4**.
 
 ![MeetRec settings](docs/meetrec-settings.png)
 
 ![MeetRec floating recording timer](docs/meetrec-floating-timer.png)
+
+## What's New In 1.0.4
+
+- Pause recordings from the tray or floating timer menu. Both indicators turn yellow and the timer holds its current time.
+- Resume the same recording from the menu or by clicking a yellow indicator. Saved audio and silence auto-stop skip the paused interval.
+- Cancel a recording directly from the paused state using the confirmation dialog.
 
 ## What's New In 1.0.3
 
@@ -50,13 +56,14 @@ Current version: **1.0.3**.
 
 ### Recording Control
 
-- **Tray icon**: left-click starts or stops recording; right-click opens recording actions, the output folder, settings, or exit.
-- **Cancel current recording**: right-click while recording and choose **Cancel This Recording** to discard the current take after confirmation.
+- Left-click the **tray icon** to start or stop recording. Right-click for recording actions, the output folder, settings, or exit.
+- Choose **Pause Recording** from the tray icon or floating timer menu. Both indicators turn yellow and the timer freezes. Left-click either indicator or choose **Resume Recording** to continue in the same file. Paused time is excluded from the saved audio and the silence auto-stop timer.
+- Choose **Cancel This Recording** from the right-click menu while recording or paused. Confirm to discard the current take.
 - **Left-click mode**: choose Last Used, Microphone, Loopback, or Both.
 - **Global hotkeys**: configure separate hotkeys for microphone, loopback, both, and stop.
 - **Record hotkeys stop recording**: when enabled, pressing any record hotkey again stops the active recording.
 - **Windows hotkey handling**: supports common combinations such as `alt+shift+r` through a low-level Windows hotkey path.
-- **Floating recording timer**: optional always-on-top timer. Click it while recording to stop; after stopping, it stays briefly in a finished state and clicking it opens the recordings folder.
+- The optional **floating recording timer** stays above other windows. Click it while recording to stop. After stopping, click it within five seconds to open the recordings folder.
 
 ### Automation And Feedback
 

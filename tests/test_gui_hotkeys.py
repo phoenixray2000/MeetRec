@@ -2,13 +2,18 @@ import json
 import os
 import tempfile
 import unittest
+from contextlib import nullcontext
+from queue import Queue
+from threading import Event
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+import numpy as np
 from PyQt6.QtCore import QObject, Qt
-from PyQt6.QtWidgets import QApplication, QGroupBox, QMenu, QMessageBox
+from PyQt6.QtGui import QIcon
+from PyQt6.QtWidgets import QApplication, QGroupBox, QMenu, QMessageBox, QSystemTrayIcon
 
 from app_metadata import SETTINGS_WINDOW_TITLE, TRAY_IDLE_TOOLTIP
 from gui import (
@@ -130,6 +135,9 @@ class FakeAction:
 
     def setEnabled(self, enabled):
         self.enabled = enabled
+
+    def setText(self, text):
+        self.label = text
 
 
 class WindowsHotkeyParserTests(unittest.TestCase):
@@ -424,6 +432,7 @@ class TrayApplicationMenuTests(unittest.TestCase):
         subject.tray_icon = FakeTrayIcon()
         subject.recording_indicator = FakeRecordingIndicator()
         subject.start_recording = lambda mode: None
+        subject.toggle_pause_recording = lambda: None
         subject.stop_recording = lambda: None
         subject.cancel_recording = lambda: None
         subject.open_settings = lambda: None
@@ -481,6 +490,140 @@ class TrayApplicationMenuTests(unittest.TestCase):
             "Cancel This Recording",
         )
         self.assertFalse(subject.action_cancel.isEnabled())
+
+    def test_pause_menu_tray_icon_and_timer_resume_the_same_recording(self):
+        with (
+            patch.object(QSystemTrayIcon, "show"),
+            patch.object(TrayApplication, "register_hotkeys"),
+            patch.object(TrayApplication, "show_tray_notification"),
+            patch("gui.create_hotkey_manager"),
+            patch("gui.SettingsWindow") as SettingsWindow,
+            patch("gui.AudioRecorder.start"),
+            patch("gui.AudioRecorder.is_alive", return_value=True),
+        ):
+            SettingsWindow.return_value.get_settings.return_value = {
+                "device_id": "mic1",
+                "output_folder": ".",
+                "format": "wav",
+                "quality": "balanced",
+                "stereo": False,
+                "normalize": False,
+            }
+            subject = TrayApplication(self.app)
+            indicator = subject.recording_indicator
+            self.addCleanup(indicator.hide_recording)
+            self.assertFalse(subject.action_pause.isEnabled())
+
+            subject.start_recording("mic")
+            recorder = subject.recorder
+            self.assertTrue(subject.action_pause.isEnabled())
+            self.assertEqual(subject.action_pause.text(), "Pause Recording")
+
+            subject.action_pause.trigger()
+            self.assertTrue(recorder.paused)
+            self.assertTrue(subject.action_stop.isEnabled())
+            self.assertEqual(subject.action_pause.text(), "Resume Recording")
+            self.assertEqual(
+                subject.tray_icon.icon().pixmap(32).toImage(),
+                QIcon(subject.icon_paused_path).pixmap(32).toImage(),
+            )
+            self.assertFalse(indicator.timer.isActive())
+
+            subject.on_tray_activated(QSystemTrayIcon.ActivationReason.Trigger)
+            self.assertFalse(recorder.paused)
+            self.assertTrue(indicator.timer.isActive())
+            self.assertEqual(subject.action_pause.text(), "Pause Recording")
+            self.assertEqual(
+                subject.tray_icon.icon().pixmap(32).toImage(),
+                QIcon(subject.icon_rec_path).pixmap(32).toImage(),
+            )
+
+            subject.action_pause.trigger()
+            subject.action_pause.trigger()
+            self.assertFalse(recorder.paused)
+
+            subject.action_pause.trigger()
+            indicator.mouseReleaseEvent(FakeMouseEvent())
+            self.assertFalse(recorder.paused)
+            self.assertIs(subject.recorder, recorder)
+            self.assertFalse(recorder.stop_event.is_set())
+
+            subject.action_pause.trigger()
+            subject.action_stop.trigger()
+            self.assertTrue(recorder.stop_event.is_set())
+            self.assertFalse(subject.action_pause.isEnabled())
+            subject.on_recording_finished("", "")
+            self.assertEqual(subject.action_pause.text(), "Pause Recording")
+
+    def test_cancel_menu_discards_paused_recording(self):
+        reads = Queue()
+        samples = Queue()
+        stream = Mock()
+
+        def read(numframes):
+            reads.put(None)
+            return np.full((numframes, 1), samples.get(timeout=5), dtype=np.float32)
+
+        stream.record.side_effect = read
+        device = Mock()
+        device.recorder.return_value = nullcontext(stream)
+        confirmations = []
+
+        def confirm(dialog):
+            confirmations.append((
+                dialog.parentWidget(),
+                bool(dialog.windowFlags() & Qt.WindowType.WindowStaysOnTopHint),
+            ))
+            return QMessageBox.StandardButton.Yes.value
+
+        with (
+            tempfile.TemporaryDirectory() as output_dir,
+            patch.object(QSystemTrayIcon, "show"),
+            patch.object(QMessageBox, "exec", confirm),
+            patch.object(TrayApplication, "register_hotkeys"),
+            patch.object(TrayApplication, "show_tray_notification"),
+            patch("gui.create_hotkey_manager"),
+            patch("gui.SettingsWindow") as SettingsWindow,
+            patch("gui.AudioRecorder._get_device", return_value=device),
+        ):
+            SettingsWindow.return_value.get_settings.return_value = {
+                "device_id": "mic1",
+                "output_folder": output_dir,
+                "format": "wav",
+                "quality": "balanced",
+                "stereo": False,
+                "normalize": False,
+            }
+            subject = TrayApplication(self.app)
+            indicator = subject.recording_indicator
+            self.addCleanup(indicator.hide_recording)
+            subject.start_recording("mic")
+            recorder = subject.recorder
+            try:
+                reads.get(timeout=5)
+                samples.put(0.25)
+                reads.get(timeout=5)
+                subject.action_pause.trigger()
+                self.assertTrue(recorder.paused)
+                self.assertTrue(subject.action_cancel.isEnabled())
+
+                subject.action_cancel.trigger()
+                self.assertEqual(confirmations, [])
+                self.app.processEvents()
+                self.assertEqual(confirmations, [(indicator, True)])
+                self.assertTrue(recorder.cancel_requested)
+            finally:
+                recorder.stop()
+                samples.put(0.0)
+                recorder.join(timeout=5)
+
+            self.app.processEvents()
+            self.assertFalse(recorder.is_alive())
+            self.assertIsNone(subject.recorder)
+            self.assertFalse(indicator.isVisible())
+            self.assertEqual(subject.tray_icon.toolTip(), TRAY_IDLE_TOOLTIP)
+            self.assertEqual(os.listdir(output_dir), [])
+            self.assertFalse(any(os.path.exists(path) for path in recorder.temp_files))
 
 
 class TrayApplicationHotkeyTests(unittest.TestCase):
@@ -605,22 +748,22 @@ class RecordingIndicatorTests(unittest.TestCase):
         self.assertEqual(RecordingIndicator.format_elapsed(59), "00:59")
         self.assertEqual(RecordingIndicator.format_elapsed(60), "01:00")
 
-    def test_click_request_emits_stop_signal(self):
+    def test_click_emits_recording_signal(self):
         indicator = RecordingIndicator()
         self.addCleanup(indicator.close)
         calls = []
-        indicator.stop_requested.connect(lambda: calls.append("stop"))
+        indicator.recording_clicked.connect(lambda: calls.append("click"))
 
-        indicator.request_stop()
+        indicator.mouseReleaseEvent(FakeMouseEvent())
 
-        self.assertEqual(calls, ["stop"])
+        self.assertEqual(calls, ["click"])
 
     def test_finished_state_left_click_opens_recordings_folder(self):
         indicator = RecordingIndicator()
         self.addCleanup(indicator.close)
         stop_calls = []
         open_calls = []
-        indicator.stop_requested.connect(lambda: stop_calls.append("stop"))
+        indicator.recording_clicked.connect(lambda: stop_calls.append("click"))
         indicator.open_folder_requested.connect(lambda: open_calls.append("open"))
         event = FakeMouseEvent()
 
@@ -665,8 +808,32 @@ class RecordingIndicatorTests(unittest.TestCase):
         self.assertFalse(indicator.is_finishing)
         self.assertFalse(indicator.finished_hide_timer.isActive())
 
+    def test_paused_timer_resumes_from_the_same_elapsed_time(self):
+        indicator = RecordingIndicator()
+        self.addCleanup(indicator.hide_recording)
+
+        with patch("gui.time.monotonic", return_value=100.0) as clock:
+            indicator.show_recording()
+            clock.return_value = 103.75
+            indicator.set_paused(True)
+            self.assertFalse(indicator.timer.isActive())
+            self.assertEqual(indicator.timer_label.text(), "00:03")
+            self.assertIn("#ffcb33", indicator.dot.styleSheet())
+
+            clock.return_value = 400.0
+            indicator.set_paused(False)
+            self.assertTrue(indicator.timer.isActive())
+            clock.return_value = 400.25
+            indicator.update_elapsed()
+            self.assertEqual(indicator.timer_label.text(), "00:04")
+            self.assertIn("#ff2d2d", indicator.dot.styleSheet())
+
 
 class TrayApplicationRecordingIndicatorTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
+
     def make_subject(self, show_indicator=True):
         indicator = FakeRecordingIndicator()
         subject = SimpleNamespace(
@@ -695,6 +862,7 @@ class TrayApplicationRecordingIndicatorTests(unittest.TestCase):
             action_record_mic=SimpleNamespace(setEnabled=lambda enabled: None),
             action_record_loop=SimpleNamespace(setEnabled=lambda enabled: None),
             action_record_both=SimpleNamespace(setEnabled=lambda enabled: None),
+            action_pause=FakeAction(),
             action_stop=FakeAction(),
             action_cancel=FakeAction(),
             tray_icon=FakeTrayIcon(),
@@ -804,36 +972,38 @@ class TrayApplicationRecordingIndicatorTests(unittest.TestCase):
 
     def test_cancel_recording_does_not_discard_without_confirmation(self):
         subject, indicator = self.make_subject(show_indicator=True)
+        indicator.visible = False
         subject.recorder = SimpleNamespace(
             is_alive=lambda: True,
-            cancel=lambda: setattr(subject, "cancelled", True),
+            stop_event=Event(),
+            cancel=Mock(return_value=True),
         )
-        subject.cancelled = False
 
-        with patch(
-            "gui.QMessageBox.question",
-            return_value=QMessageBox.StandardButton.No,
-        ):
+        with patch.object(QMessageBox, "exec", return_value=QMessageBox.StandardButton.No.value):
             TrayApplication.cancel_recording(subject)
 
-        self.assertFalse(subject.cancelled)
+        subject.recorder.cancel.assert_not_called()
         self.assertEqual(indicator.hide_count, 0)
 
     def test_cancel_recording_discards_after_confirmation(self):
         subject, indicator = self.make_subject(show_indicator=True)
+        indicator.visible = False
         subject.recorder = SimpleNamespace(
             is_alive=lambda: True,
-            cancel=lambda: setattr(subject, "cancelled", True),
+            stop_event=Event(),
+            cancel=Mock(return_value=True),
         )
-        subject.cancelled = False
 
-        with patch(
-            "gui.QMessageBox.question",
-            return_value=QMessageBox.StandardButton.Yes,
-        ):
+        def confirm(dialog):
+            self.assertIsNone(dialog.parentWidget())
+            self.assertTrue(dialog.windowFlags() & Qt.WindowType.WindowStaysOnTopHint)
+            self.assertIs(dialog.defaultButton(), dialog.button(QMessageBox.StandardButton.No))
+            return QMessageBox.StandardButton.Yes.value
+
+        with patch.object(QMessageBox, "exec", confirm):
             TrayApplication.cancel_recording(subject)
 
-        self.assertTrue(subject.cancelled)
+        subject.recorder.cancel.assert_called_once_with()
         self.assertEqual(indicator.hide_count, 1)
         self.assertFalse(subject.action_stop.enabled)
         self.assertFalse(subject.action_cancel.enabled)

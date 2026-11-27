@@ -438,49 +438,38 @@ class RawRecorder(threading.Thread):
     """
     Helper thread to record a single device to a WAV file.
     """
-    def __init__(
-        self,
-        device,
-        filepath,
-        samplerate=44100,
-        channels=2,
-        subtype="PCM_16",
-        source_name=None,
-        on_audio_data=None,
-    ):
+    def __init__(self, session, device, filepath, source_name):
         super().__init__()
+        self.session = session
         self.device = device
         self.filepath = filepath
-        self.samplerate = samplerate
-        self.channels = channels
-        self.subtype = subtype
         self.source_name = source_name
-        self.on_audio_data = on_audio_data
-        self.stop_event = threading.Event()
         self.error = None
 
     def run(self):
+        samplerate = self.session.profile["sample_rate"]
+        channels = self.session.profile["channels"]
         try:
             with sf.SoundFile(
                 self.filepath,
                 mode="w",
-                samplerate=self.samplerate,
-                channels=self.channels,
+                samplerate=samplerate,
+                channels=channels,
                 format="WAV",
-                subtype=self.subtype,
-            ) as f_wav:
-                with self.device.recorder(samplerate=self.samplerate, channels=self.channels) as mic:
-                    while not self.stop_event.is_set():
-                        data = mic.record(numframes=RAW_RECORDER_CHUNK_FRAMES)
-                        if self.on_audio_data and self.source_name:
-                            self.on_audio_data(self.source_name, data)
-                        f_wav.write(data)
+                subtype=self.session.profile["subtype"],
+            ) as wav:
+                with self.device.recorder(samplerate=samplerate, channels=channels) as stream:
+                    previous_token = self.session.capture_token
+                    while not self.session.stop_event.is_set():
+                        token = self.session.capture_token
+                        if token is not None and token is not previous_token:
+                            stream.flush()
+                        data = stream.record(numframes=RAW_RECORDER_CHUNK_FRAMES)
+                        self.session.write_chunk(self.source_name, wav, data, token)
+                        previous_token = token
         except Exception as e:
             self.error = str(e)
-
-    def stop(self):
-        self.stop_event.set()
-        self.join()
+            self.session.stop()
 
 class AudioRecorder(threading.Thread):
     """
@@ -527,7 +516,12 @@ class AudioRecorder(threading.Thread):
         # Temp files
         self.temp_files = []
         self.recorders = []
-        self.activity_lock = threading.Lock()
+        self.capture_lock = threading.RLock()
+        self.capture_token = object()
+        self._paused_at = None
+        self._paused_seconds = 0.0
+        self._recorded_frames = 0
+        self._resume_frame = 0
         self.activity_detectors = {}
         self.source_active = {}
         self.auto_stop_controller = None
@@ -557,25 +551,67 @@ class AudioRecorder(threading.Thread):
         return build_activity_detector(source_name)
 
     def _setup_auto_stop(self):
-        source_names = self._active_source_names()
-        self.activity_detectors = {
-            source_name: self._build_activity_detector(source_name)
-            for source_name in source_names
-        }
-        self.source_active = {source_name: False for source_name in source_names}
-        self.auto_stop_controller = AutoStopController(
-            silence_seconds=self.auto_stop_silence_seconds,
-            min_record_seconds=AUTO_STOP_MIN_RECORD_SECONDS,
-        )
-        self.auto_stop_triggered = False
-        self.auto_stop_reason = None
+        with self.capture_lock:
+            source_names = self._active_source_names()
+            self.activity_detectors = {
+                source_name: self._build_activity_detector(source_name)
+                for source_name in source_names
+            }
+            self.source_active = {source_name: False for source_name in source_names}
+            now = self._paused_at if self.paused else time.monotonic()
+            self.auto_stop_controller = AutoStopController(
+                silence_seconds=self.auto_stop_silence_seconds,
+                min_record_seconds=AUTO_STOP_MIN_RECORD_SECONDS,
+                start_ts=now - self._paused_seconds,
+            )
+            self.auto_stop_triggered = False
+            self.auto_stop_reason = None
+
+    @property
+    def paused(self):
+        return self._paused_at is not None
+
+    def set_paused(self, paused):
+        with self.capture_lock:
+            if self.stop_event.is_set() or paused == self.paused:
+                return False
+
+            now = time.monotonic()
+            if paused:
+                self._paused_at = now
+                self._resume_frame = self._recorded_frames
+                self.capture_token = None
+            else:
+                self._paused_seconds += now - self._paused_at
+                self._paused_at = None
+                self.capture_token = object()
+            return True
+
+    def write_chunk(self, source_name, wav, data, token):
+        if token is None:
+            return
+        with self.capture_lock:
+            if self.stop_event.is_set() or token is not self.capture_token:
+                return
+
+            position = wav.tell()
+            if position < self._resume_frame:
+                wav.write(np.zeros((self._resume_frame - position, data.shape[1]), dtype=data.dtype))
+                position = self._resume_frame
+            wav.write(data)
+            self._recorded_frames = max(self._recorded_frames, position + len(data))
+            self.report_activity(source_name, data)
 
     def report_activity(self, source_name, data, now=None):
-        with self.activity_lock:
+        with self.capture_lock:
+            if self.paused or self.stop_event.is_set():
+                return
+
             detector = self.activity_detectors.get(source_name)
             if detector is None:
                 return
 
+            now = (time.monotonic() if now is None else now) - self._paused_seconds
             self.source_active[source_name] = detector.update(
                 data,
                 self.profile["sample_rate"],
@@ -642,88 +678,29 @@ class AudioRecorder(threading.Thread):
         self.recorders = []
         
         try:
-            samplerate = self.profile["sample_rate"]
-            channels = self.profile["channels"]
             subtype = self.profile["subtype"]
             self._setup_auto_stop()
 
-            # 1. Setup Recorders
-            if self.source_mode == "both":
-                # Need two recorders
-                dev_mic = self._get_device(is_loopback=False)
-                dev_loop = self._get_device(is_loopback=True)
-                
-                t1 = tempfile.NamedTemporaryFile(suffix=".wav", delete=False).name
-                t2 = tempfile.NamedTemporaryFile(suffix=".wav", delete=False).name
-                self.temp_files = [t1, t2]
-                
-                self.recorders.append(
-                    RawRecorder(
-                        dev_mic,
-                        t1,
-                        samplerate=samplerate,
-                        channels=channels,
-                        subtype=subtype,
-                        source_name="mic",
-                        on_audio_data=self.report_activity,
-                    )
-                )
-                self.recorders.append(
-                    RawRecorder(
-                        dev_loop,
-                        t2,
-                        samplerate=samplerate,
-                        channels=channels,
-                        subtype=subtype,
-                        source_name="loopback",
-                        on_audio_data=self.report_activity,
-                    )
-                )
-                
-            elif self.source_mode == "loopback":
-                dev = self._get_device(is_loopback=True)
-                t1 = tempfile.NamedTemporaryFile(suffix=".wav", delete=False).name
-                self.temp_files = [t1]
-                self.recorders.append(
-                    RawRecorder(
-                        dev,
-                        t1,
-                        samplerate=samplerate,
-                        channels=channels,
-                        subtype=subtype,
-                        source_name="loopback",
-                        on_audio_data=self.report_activity,
-                    )
-                )
-                
-            else: # mic
-                dev = self._get_device(is_loopback=False)
-                t1 = tempfile.NamedTemporaryFile(suffix=".wav", delete=False).name
-                self.temp_files = [t1]
-                self.recorders.append(
-                    RawRecorder(
-                        dev,
-                        t1,
-                        samplerate=samplerate,
-                        channels=channels,
-                        subtype=subtype,
-                        source_name="mic",
-                        on_audio_data=self.report_activity,
-                    )
-                )
+            for source_name in self._active_source_names():
+                device = self._get_device(is_loopback=(source_name == "loopback"))
+                path = tempfile.NamedTemporaryFile(suffix=".wav", delete=False).name
+                self.temp_files.append(path)
+                self.recorders.append(RawRecorder(self, device, path, source_name))
 
             print(f"Starting recording mode: {self.source_mode}")
 
-            # 2. Start Recording
+            started_recorders = []
+            try:
+                for r in self.recorders:
+                    r.start()
+                    started_recorders.append(r)
+                self.stop_event.wait()
+            finally:
+                self.stop()
+                for r in started_recorders:
+                    r.join()
+
             for r in self.recorders:
-                r.start()
-            
-            # Wait for stop signal
-            self.stop_event.wait()
-            
-            # 3. Stop Recording
-            for r in self.recorders:
-                r.stop()
                 if r.error:
                     raise Exception(f"Recorder error: {r.error}")
 
@@ -762,11 +739,16 @@ class AudioRecorder(threading.Thread):
                 self.callback(self.final_filepath, self.error_message)
 
     def stop(self):
-        self.stop_event.set()
+        with self.capture_lock:
+            self.stop_event.set()
 
     def cancel(self):
-        self.cancel_requested = True
-        self.stop_event.set()
+        with self.capture_lock:
+            if self.stop_event.is_set():
+                return False
+            self.cancel_requested = True
+            self.stop_event.set()
+            return True
 
     def _maybe_trim_temp_sources(self):
         if not self.trim_silence:

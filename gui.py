@@ -5,6 +5,7 @@ import shutil
 import tempfile
 import subprocess
 import ctypes
+import time
 from ctypes import wintypes
 from PyQt6.QtWidgets import (QApplication, QSystemTrayIcon, QMenu, QMainWindow, 
                              QWidget, QVBoxLayout, QHBoxLayout, QLabel, QComboBox, 
@@ -18,6 +19,7 @@ from app_metadata import (
     APP_NAME,
     APP_ICON_FILENAME,
     ICON_IDLE_FILENAME,
+    ICON_PAUSED_FILENAME,
     ICON_RECORDING_FILENAME,
     READY_MESSAGE_BODY,
     READY_MESSAGE_TITLE,
@@ -37,6 +39,8 @@ from audio_recorder import (
 from clipboard_utils import copy_file_to_clipboard
 
 CONFIG_FILENAME = "settings.json"
+PAUSE_RECORDING_TEXT = "Pause Recording"
+RESUME_RECORDING_TEXT = "Resume Recording"
 NORMALIZE_DEFAULT_ENABLED = True
 ECHO_SUPPRESSION_UI_DEFAULT_ENABLED = True
 NOISE_REDUCTION_UI_DEFAULT_ENABLED = False
@@ -352,7 +356,7 @@ class SignalManager(QObject):
 class RecordingIndicator(QWidget):
     FINISHED_HIDE_DELAY_MS = 5000
 
-    stop_requested = pyqtSignal()
+    recording_clicked = pyqtSignal()
     open_folder_requested = pyqtSignal()
 
     def __init__(self, parent=None):
@@ -363,6 +367,7 @@ class RecordingIndicator(QWidget):
             | Qt.WindowType.WindowStaysOnTopHint,
         )
         self.elapsed_seconds = 0
+        self._last_update_ts = time.monotonic()
         self._drag_offset = None
         self._press_global_pos = None
         self._dragged = False
@@ -413,8 +418,9 @@ class RecordingIndicator(QWidget):
         self.finished_hide_timer.timeout.connect(self.hide_recording)
         self.set_recording_style()
 
-    def set_recording_style(self):
-        self.dot.setStyleSheet("background-color: #ff2d2d; border-radius: 4px;")
+    def set_recording_style(self, paused=False):
+        color = "#ffcb33" if paused else "#ff2d2d"
+        self.dot.setStyleSheet(f"background-color: {color}; border-radius: 4px;")
         self.container.setStyleSheet(
             """
             QWidget#recordingIndicatorContainer {
@@ -447,17 +453,29 @@ class RecordingIndicator(QWidget):
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.elapsed_seconds = 0
         self.update_timer_text()
-        self.set_recording_style()
         self.position_near_taskbar()
         self.show()
         self.raise_()
-        self.timer.start()
+        self.set_paused(False)
+
+    def set_paused(self, paused):
+        if paused:
+            self.timer.stop()
+            self.update_elapsed()
+        else:
+            self._last_update_ts = time.monotonic()
+            self.timer.start()
+        self.set_recording_style(paused)
+        self.setToolTip(RESUME_RECORDING_TEXT if paused else "Stop Recording")
 
     def show_finished(self, hide_after_ms=None):
+        if self.timer.isActive():
+            self.update_elapsed()
         self.timer.stop()
         self.is_finishing = True
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.set_finished_style()
+        self.setToolTip("Open Recordings Folder")
         self.raise_()
         delay_ms = self.FINISHED_HIDE_DELAY_MS if hide_after_ms is None else hide_after_ms
         self.finished_hide_timer.start(delay_ms)
@@ -469,7 +487,9 @@ class RecordingIndicator(QWidget):
         self.hide()
 
     def update_elapsed(self):
-        self.elapsed_seconds += 1
+        now = time.monotonic()
+        self.elapsed_seconds += now - self._last_update_ts
+        self._last_update_ts = now
         self.update_timer_text()
 
     def update_timer_text(self):
@@ -483,11 +503,6 @@ class RecordingIndicator(QWidget):
         x = geometry.right() - self.width() - 16
         y = geometry.bottom() - self.height() - 16
         self.move(x, y)
-
-    def request_stop(self):
-        if self.is_finishing:
-            return
-        self.stop_requested.emit()
 
     def request_open_folder(self):
         if self.is_finishing:
@@ -541,7 +556,7 @@ class RecordingIndicator(QWidget):
             return
         if event.button() == Qt.MouseButton.LeftButton:
             if not self._dragged:
-                self.request_stop()
+                self.recording_clicked.emit()
             self._drag_offset = None
             self._press_global_pos = None
             self._dragged = False
@@ -1212,13 +1227,14 @@ class TrayApplication(QObject):
 
         self.icon_idle_path = resource_path(ICON_IDLE_FILENAME)
         self.icon_rec_path = resource_path(ICON_RECORDING_FILENAME)
+        self.icon_paused_path = resource_path(ICON_PAUSED_FILENAME)
         self.generate_icons()
             
         self.tray_icon = QSystemTrayIcon(QIcon(self.icon_idle_path), self.app)
         self.tray_icon.setToolTip(TRAY_IDLE_TOOLTIP)
         self.tray_icon.activated.connect(self.on_tray_activated)
         self.recording_indicator = RecordingIndicator()
-        self.recording_indicator.stop_requested.connect(self.stop_recording)
+        self.recording_indicator.recording_clicked.connect(self.on_recording_clicked)
         self.recording_indicator.open_folder_requested.connect(self.open_recordings_folder)
         
         self.build_menu()
@@ -1239,7 +1255,7 @@ class TrayApplication(QObject):
     def generate_icons(self):
         missing = [
             path
-            for path in (self.icon_idle_path, self.icon_rec_path)
+            for path in (self.icon_idle_path, self.icon_rec_path, self.icon_paused_path)
             if not os.path.exists(path)
         ]
         if missing:
@@ -1253,11 +1269,14 @@ class TrayApplication(QObject):
         self.action_record_loop.triggered.connect(lambda: self.start_recording("loopback"))
         self.action_record_both = QAction("Start Recording (Both)", self)
         self.action_record_both.triggered.connect(lambda: self.start_recording("both"))
+        self.action_pause = QAction(PAUSE_RECORDING_TEXT, self)
+        self.action_pause.triggered.connect(self.toggle_pause_recording)
+        self.action_pause.setEnabled(False)
         self.action_stop = QAction("Stop Recording", self)
         self.action_stop.triggered.connect(self.stop_recording)
         self.action_stop.setEnabled(False)
         self.action_cancel = QAction("Cancel This Recording", self)
-        self.action_cancel.triggered.connect(self.cancel_recording)
+        self.action_cancel.triggered.connect(self.cancel_recording, Qt.ConnectionType.QueuedConnection)
         self.action_cancel.setEnabled(False)
         self.action_settings = QAction("Settings", self)
         self.action_settings.triggered.connect(self.open_settings)
@@ -1269,6 +1288,7 @@ class TrayApplication(QObject):
         self.menu.addAction(self.action_record_mic)
         self.menu.addAction(self.action_record_loop)
         self.menu.addAction(self.action_record_both)
+        self.menu.addAction(self.action_pause)
         self.menu.addAction(self.action_stop)
         self.menu.addAction(self.action_cancel)
         self.menu.addSeparator()
@@ -1324,8 +1344,8 @@ class TrayApplication(QObject):
 
     def on_tray_activated(self, reason):
         if reason == QSystemTrayIcon.ActivationReason.Trigger:
-            if self.recorder and self.recorder.is_alive():
-                self.stop_recording()
+            if self.recorder:
+                self.on_recording_clicked()
             else:
                 settings = self.settings_window.get_settings()
                 click_mode = settings.get("tray_click_mode", "Last Used")
@@ -1334,6 +1354,15 @@ class TrayApplication(QObject):
                 elif click_mode == "Loopback": target_mode = "loopback"
                 elif click_mode == "Both": target_mode = "both"
                 self.start_recording(target_mode)
+
+    def on_recording_clicked(self):
+        recorder = self.recorder
+        if not recorder or not recorder.is_alive() or recorder.stop_event.is_set():
+            return
+        if recorder.paused:
+            self.toggle_pause_recording()
+        else:
+            self.stop_recording()
 
     def open_recordings_folder(self):
         try:
@@ -1361,7 +1390,8 @@ class TrayApplication(QObject):
         self.settings_window.activateWindow()
 
     def start_recording(self, mode="mic"):
-        if self.recorder and self.recorder.is_alive(): return
+        if self.recorder:
+            return
         self.last_mode = mode    
         settings = self.settings_window.get_settings()
         target_id = settings['device_id']
@@ -1388,6 +1418,7 @@ class TrayApplication(QObject):
         self.action_record_mic.setEnabled(False)
         self.action_record_loop.setEnabled(False)
         self.action_record_both.setEnabled(False)
+        self.action_pause.setEnabled(True)
         self.action_stop.setEnabled(True)
         self.action_cancel.setEnabled(True)
         self.tray_icon.setIcon(QIcon(self.icon_rec_path)) 
@@ -1398,40 +1429,70 @@ class TrayApplication(QObject):
                 recording_indicator.show_recording()
         self.show_tray_notification("Started", f"Recording {mode}", QSystemTrayIcon.MessageIcon.NoIcon, 1000)
 
+    def toggle_pause_recording(self):
+        recorder = self.recorder
+        if not recorder or not recorder.is_alive():
+            return
+
+        paused = not recorder.paused
+        if not recorder.set_paused(paused):
+            return
+
+        self.action_pause.setText(RESUME_RECORDING_TEXT if paused else PAUSE_RECORDING_TEXT)
+        self.tray_icon.setIcon(QIcon(self.icon_paused_path if paused else self.icon_rec_path))
+        if paused:
+            self.tray_icon.setToolTip(f"{APP_NAME} Paused ({recorder.source_mode})\nClick to resume recording")
+        else:
+            self.tray_icon.setToolTip(f"{APP_NAME} Recording ({recorder.source_mode})")
+        indicator = self.recording_indicator
+        if indicator.isVisible() and not indicator.is_finishing:
+            indicator.set_paused(paused)
+
     def stop_recording(self):
         recording_indicator = getattr(self, "recording_indicator", None)
         if recording_indicator and recording_indicator.isVisible():
             recording_indicator.show_finished(RecordingIndicator.FINISHED_HIDE_DELAY_MS)
         if self.recorder:
+            self.action_pause.setEnabled(False)
             self.action_stop.setEnabled(False)
             self.action_cancel.setEnabled(False)
             self.recorder.stop()
 
     def cancel_recording(self):
-        if not self.recorder or not self.recorder.is_alive():
+        recorder = self.recorder
+        if not recorder or not recorder.is_alive() or recorder.stop_event.is_set():
             return
 
-        response = QMessageBox.question(
-            None,
+        indicator = self.recording_indicator
+        confirmation = QMessageBox(
+            QMessageBox.Icon.Question,
             "Cancel Recording",
             "Cancel this recording and discard the captured audio? No file will be saved.",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No,
+            indicator if indicator.isVisible() else None,
         )
-        if response != QMessageBox.StandardButton.Yes:
+        confirmation.setOption(QMessageBox.Option.DontUseNativeDialog)
+        confirmation.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint)
+        confirmation.setDefaultButton(QMessageBox.StandardButton.No)
+        confirmation.setEscapeButton(QMessageBox.StandardButton.No)
+        if (
+            confirmation.exec() != QMessageBox.StandardButton.Yes.value
+            or self.recorder is not recorder
+            or not recorder.cancel()
+        ):
             return
 
+        self.action_pause.setEnabled(False)
         self.action_stop.setEnabled(False)
         self.action_cancel.setEnabled(False)
-        recording_indicator = getattr(self, "recording_indicator", None)
-        if recording_indicator:
-            recording_indicator.hide_recording()
-        self.recorder.cancel()
+        indicator.hide_recording()
 
     def on_recording_finished(self, path, error):
         self.action_record_mic.setEnabled(True)
         self.action_record_loop.setEnabled(True)
         self.action_record_both.setEnabled(True)
+        self.action_pause.setText(PAUSE_RECORDING_TEXT)
+        self.action_pause.setEnabled(False)
         self.action_stop.setEnabled(False)
         self.action_cancel.setEnabled(False)
         self.tray_icon.setIcon(QIcon(self.icon_idle_path))
@@ -1460,7 +1521,6 @@ class TrayApplication(QObject):
                     new_path = os.path.join(temp_dir, os.path.basename(path))
                     if os.path.exists(new_path):
                         base, ext = os.path.splitext(new_path)
-                        import time
                         new_path = f"{base}_{int(time.time())}{ext}"
                     shutil.move(path, new_path)
                     final_path = new_path

@@ -12,6 +12,7 @@ _binaries = [(_rnnoise_dll, ".")] if os.path.exists(_rnnoise_dll) else []
 from app_metadata import (
     APP_ICON_FILENAME,
     ICON_IDLE_FILENAME,
+    ICON_PAUSED_FILENAME,
     ICON_RECORDING_FILENAME,
     VERSION_RESOURCE_FILENAME,
 )
@@ -24,6 +25,7 @@ a = Analysis(
     datas=[
         (ICON_IDLE_FILENAME, 'docs'),
         (ICON_RECORDING_FILENAME, 'docs'),
+        (ICON_PAUSED_FILENAME, 'docs'),
     ],
     hiddenimports=[],
     hookspath=[],

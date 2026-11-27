@@ -1,4 +1,5 @@
 import unittest
+from unittest.mock import patch
 
 import numpy as np
 
@@ -170,6 +171,29 @@ class AudioRecorderAutoStopTests(unittest.TestCase):
 
         self.assertFalse(recorder.stop_event.is_set())
         self.assertFalse(recorder.auto_stop_triggered)
+
+    def test_pause_excludes_elapsed_time_from_silence_auto_stop(self):
+        recorder = AudioRecorder(
+            mic_id="mic1",
+            source_mode="mic",
+            output_folder=".",
+            auto_stop_silence_seconds=300,
+        )
+
+        with patch("audio_recorder.time.monotonic", return_value=0.0) as clock:
+            recorder._setup_auto_stop()
+            recorder.report_activity("mic", chunk(0.25), now=80.0)
+            clock.return_value = 100.0
+            self.assertTrue(recorder.set_paused(True))
+            recorder.report_activity("mic", chunk(0.25), now=900.0)
+            self.assertFalse(recorder.stop_event.is_set())
+            clock.return_value = 1000.0
+            self.assertTrue(recorder.set_paused(False))
+
+        recorder.report_activity("mic", chunk(0), now=1279.0)
+        self.assertFalse(recorder.stop_event.is_set())
+        recorder.report_activity("mic", chunk(0), now=1280.0)
+        self.assertTrue(recorder.auto_stop_triggered)
 
     def test_finish_metadata_records_auto_stop_state(self):
         recorder = AudioRecorder(

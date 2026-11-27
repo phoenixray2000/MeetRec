@@ -528,6 +528,94 @@ class OutputProfileTests(unittest.TestCase):
         )
 
 
+class AudioRecorderPauseTests(unittest.TestCase):
+    def test_both_mode_aligns_resumed_audio_and_saves_when_stopped_paused(self):
+        import tempfile
+        from contextlib import nullcontext
+        from queue import Queue
+
+        import numpy as np
+        import soundfile as sf
+
+        from audio_recorder import AudioRecorder, RAW_RECORDER_CHUNK_FRAMES
+
+        class CaptureStream:
+            def __init__(self):
+                self.reads = Queue()
+                self.levels = Queue()
+                self.flush_count = 0
+
+            def recorder(self, **kwargs):
+                return nullcontext(self)
+
+            def record(self, numframes):
+                self.reads.put(None)
+                return np.full((numframes, 1), self.levels.get(timeout=5), dtype=np.float32)
+
+            def flush(self):
+                self.flush_count += 1
+
+            def deliver(self, level):
+                self.levels.put(level)
+                self.reads.get(timeout=5)
+
+        mic = CaptureStream()
+        loopback = CaptureStream()
+        streams = (mic, loopback)
+        with tempfile.TemporaryDirectory() as output_dir:
+            recorder = AudioRecorder(
+                mic_id="mic1",
+                source_mode="both",
+                output_folder=output_dir,
+                output_format="wav",
+                normalize=False,
+                echo_suppression=False,
+                ducking=False,
+                auto_stop_silence_seconds=None,
+            )
+
+            with patch.object(recorder, "_get_device", side_effect=lambda is_loopback: streams[is_loopback]):
+                recorder.start()
+                try:
+                    for stream in streams:
+                        stream.reads.get(timeout=5)
+                    mic.deliver(0.125)
+                    loopback.deliver(0.25)
+                    mic.deliver(0.125)
+
+                    self.assertTrue(recorder.set_paused(True))
+                    for stream in streams:
+                        stream.deliver(0.875)
+                    self.assertTrue(recorder.set_paused(False))
+                    for stream in streams:
+                        stream.deliver(0.875)
+                        self.assertEqual(stream.flush_count, 1)
+
+                    mic.deliver(0.25)
+                    loopback.deliver(0.50)
+
+                    self.assertTrue(recorder.set_paused(True))
+                    self.assertTrue(recorder.set_paused(False))
+                    for stream in streams:
+                        stream.deliver(0.875)
+                        self.assertEqual(stream.flush_count, 2)
+
+                    self.assertTrue(recorder.set_paused(True))
+                finally:
+                    recorder.stop()
+                    for stream in streams:
+                        stream.levels.put(0.875)
+                    recorder.join(timeout=5)
+
+            self.assertFalse(recorder.is_alive())
+            self.assertFalse(recorder.set_paused(False))
+            self.assertIsNone(recorder.error_message)
+            data, samplerate = sf.read(recorder.final_filepath)
+            self.assertEqual(samplerate, recorder.profile["sample_rate"])
+            expected = np.repeat([0.375, 0.125, 0.75], RAW_RECORDER_CHUNK_FRAMES)
+            np.testing.assert_allclose(data, expected)
+
+
 class AudioRecorderCancelTests(unittest.TestCase):
     def test_cancel_skips_final_output_and_reports_empty_success(self):
         import os
@@ -546,7 +634,7 @@ class AudioRecorderCancelTests(unittest.TestCase):
             def start(self):
                 self.started = True
 
-            def stop(self):
+            def join(self):
                 self.stopped = True
 
         with tempfile.TemporaryDirectory() as temp_dir:
